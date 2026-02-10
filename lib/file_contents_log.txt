@@ -1,0 +1,3072 @@
+ 
+
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\file_contents_log.txt"
+--------------------------------------------------------------------------------
+ 
+
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\file_contents_log.txt"
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\main.dart"
+--------------------------------------------------------------------------------
+import 'package:flutter/material.dart';
+import 'host/service/background_service_logic.dart';
+import 'host/presentation/screens/inbox_screen.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeBackgroundService();
+  runApp(const MaterialApp(
+    debugShowCheckedModeBanner: false,
+    title: 'SMS Host',
+    home: InboxScreen(),
+  ));
+}
+
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\main_web.dart"
+--------------------------------------------------------------------------------
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'client/presentation/screens/login_screen.dart';
+
+void main() {
+  runApp(const ProviderScope(
+    child: MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: "SMS Web Client",
+      home: LoginScreen(),
+    ),
+  ));
+}
+
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\scan.bat"
+--------------------------------------------------------------------------------
+@echo off
+setlocal enabledelayedexpansion
+
+:: Устанавливаем имя выходного файла
+set "outputFile=file_contents_log.txt"
+
+:: Создаем или очищаем выходной файл
+echo. > "%outputFile%"
+
+echo "Начинаем сканирование директории и запись содержимого файлов в %outputFile%..."
+echo.
+
+:: Обходим все файлы и папки, начиная с текущей директории
+for /r %%f in (*) do (
+    :: Проверяем, является ли текущий элемент файлом, а не папкой
+    if exist "%%f" (
+        echo --------------------------------------------------------------------------------
+        echo Путь к файлу: "%%f"
+        echo --------------------------------------------------------------------------------
+        
+        :: Добавляем путь к файлу в выходной файл
+        echo.>> "%outputFile%"
+        echo -------------------------------------------------------------------------------->> "%outputFile%"
+        echo Путь к файлу: "%%f">> "%outputFile%"
+        echo -------------------------------------------------------------------------------->> "%outputFile%"
+        
+        :: Читаем содержимое файла и добавляем его в выходной файл
+        :: Используем findstr для отображения содержимого файла в консоли
+        :: Используем type для записи содержимого в файл
+        type "%%f" >> "%outputFile%"
+        echo.>> "%outputFile%"
+        
+        echo Содержимое файла "%%f" записано.
+        echo.
+    )
+)
+
+echo.
+echo "Сканирование завершено. Все пути и содержимое файлов записаны в %outputFile%."
+pause
+
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\data\api_client.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'package:android_host/shared/security_service.dart';
+import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
+import '../../shared/shared_models.dart'; // Или ваш путь к shared_models
+
+class ApiClient {
+  final String baseUrl;
+  final SecurityService _security;
+
+  ApiClient(this.baseUrl, String password)
+    : _security = SecurityService(password);
+
+  // === ДОБАВЛЕН ЭТОТ ГЕТТЕР ===
+  // Он нужен, чтобы корректно обрабатывать URL, даже если он пустой (при локальном запуске)
+  // или содержит лишний слеш в конце.
+  String get effectiveBaseUrl {
+    if (baseUrl.isEmpty) return "";
+    if (baseUrl.endsWith('/')) {
+      return baseUrl.substring(0, baseUrl.length - 1);
+    }
+    return baseUrl;
+  }
+  // ============================
+
+  Future<List<SimCardDto>> fetchSims() async {
+    // Используем effectiveBaseUrl вместо baseUrl
+    final res = await http.get(Uri.parse('$effectiveBaseUrl/api/sims'));
+
+    if (res.statusCode != 200) {
+      throw Exception('Server Error: ${res.statusCode} ${res.body}');
+    }
+
+    try {
+      final List data = _security.decrypt(res.body);
+      return data.map((e) => SimCardDto.fromJson(e)).toList();
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<List<SmsMessageDto>> fetchMessages() async {
+    final res = await http.get(Uri.parse('$effectiveBaseUrl/api/messages'));
+
+    if (res.statusCode != 200) {
+      throw Exception('Server Error: ${res.statusCode}');
+    }
+
+    try {
+      final List data = _security.decrypt(res.body);
+      return data.map((e) => SmsMessageDto.fromJson(e)).toList();
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<void> sendSms(String phone, String body, int subId) async {
+    final encryptedPayload = _security.encrypt({
+      'address': phone,
+      'body': body,
+      'subId': subId,
+    });
+
+    final res = await http.post(
+      Uri.parse('$effectiveBaseUrl/api/send'),
+      body: encryptedPayload,
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception("Failed to send: ${res.body}");
+    }
+  }
+
+  // === МЕТОДЫ УДАЛЕНИЯ ===
+
+  Future<void> deleteMessage(int id) async {
+    // Теперь effectiveBaseUrl определен и ошибки не будет
+    final url = Uri.parse('$effectiveBaseUrl/api/messages/$id');
+    final res = await http.delete(url);
+    if (res.statusCode != 200) {
+      throw Exception("Failed to delete message: ${res.body}");
+    }
+  }
+
+  Future<void> deleteThread(int threadId) async {
+    final url = Uri.parse('$effectiveBaseUrl/api/threads/$threadId');
+    final res = await http.delete(url);
+    if (res.statusCode != 200) {
+      throw Exception("Failed to delete thread: ${res.body}");
+    }
+  }
+
+  // ======================
+
+  Stream<dynamic> connectWs() {
+    // Для веб-сокетов нужно менять http на ws
+    String wsUrl;
+    if (effectiveBaseUrl.isEmpty) {
+      // Если базовый URL пуст (относительный путь), формируем WS путь вручную
+      // Но обычно connectWs вызывается, когда мы уже знаем хост
+      // Для надежности берем переданный baseUrl
+      wsUrl = "/ws";
+    } else {
+      wsUrl = '${effectiveBaseUrl.replaceFirst('http', 'ws')}/ws';
+    }
+
+    final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+
+    return channel.stream
+        .map((event) {
+          try {
+            return _security.decrypt(event);
+          } catch (e) {
+            return null;
+          }
+        })
+        .where((element) => element != null);
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\logic\network_scanner.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'package:http/http.dart' as http;
+
+class NetworkScanner {
+  static Future<String?> findHostIP() async {
+
+    // ШАГ 1: Попробуем известные подсети
+    final subnets = [3, 0, 1, 100];
+    const int batchSize = 15; // Уменьшим размер пачки для стабильности
+
+    for (var subnet in subnets) {
+      for (var i = 1; i < 255; i += batchSize) {
+        final List<Future<String?>> currentBatch = [];
+
+        for (var j = 0; j < batchSize; j++) {
+          final lastOctet = i + j;
+          if (lastOctet >= 255) break;
+          final ip = "192.168.$subnet.$lastOctet";
+          currentBatch.add(_checkIP(ip));
+        }
+
+        final results = await Future.wait(currentBatch);
+        for (var result in results) {
+          if (result != null) return result;
+        }
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+    }
+    return null;
+  }
+
+  static Future<String?> _checkIP(String host) async {
+    try {
+      final url = Uri.parse("http://$host:8080/api/ping");
+      // Увеличим таймаут до 2 секунд
+      final response = await http.get(url).timeout(const Duration(seconds: 2));
+
+      if (response.statusCode == 200) {
+        if (response.body.contains("Android Host")) {
+          return "http://$host:8080";
+        }
+      }
+    } catch (e) {
+      // Можно раскомментировать для отладки:
+      // print("Check $host failed: $e");
+    }
+    return null;
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\logic\providers.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:audioplayers/audioplayers.dart';
+import '../../shared/shared_models.dart';
+import '../data/api_client.dart';
+
+// === 1. Server URL Notifier ===
+class ServerUrlNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void set(String? url) => state = url;
+}
+
+final serverUrlProvider = NotifierProvider<ServerUrlNotifier, String?>(
+  ServerUrlNotifier.new,
+);
+
+// === 2. Password Notifier ===
+class PasswordNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void set(String? pass) => state = pass;
+}
+
+final passwordProvider = NotifierProvider<PasswordNotifier, String?>(
+  PasswordNotifier.new,
+);
+
+// === 3. Connection Status Notifier ===
+class ConnectionNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+  void set(bool isConnected) => state = isConnected;
+}
+
+final isConnectedProvider = NotifierProvider<ConnectionNotifier, bool>(
+  ConnectionNotifier.new,
+);
+
+// === 4. Sims List Notifier ===
+class SimsNotifier extends Notifier<List<SimCardDto>> {
+  @override
+  List<SimCardDto> build() => [];
+  void set(List<SimCardDto> sims) => state = sims;
+}
+
+final simsProvider = NotifierProvider<SimsNotifier, List<SimCardDto>>(
+  SimsNotifier.new,
+);
+
+// === 5. Messages List Notifier ===
+class MessagesNotifier extends Notifier<List<SmsMessageDto>> {
+  @override
+  List<SmsMessageDto> build() => [];
+
+  void set(List<SmsMessageDto> messages) => state = messages;
+
+  void add(SmsMessageDto msg) {
+    state = [...state, msg];
+  }
+}
+
+final allMessagesProvider =
+    NotifierProvider<MessagesNotifier, List<SmsMessageDto>>(
+      MessagesNotifier.new,
+    );
+
+// === 6. Selected Chat Notifier (Для UI) ===
+class SelectedChatNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void select(String? phone) => state = phone;
+}
+
+final selectedChatIdProvider = NotifierProvider<SelectedChatNotifier, String?>(
+  SelectedChatNotifier.new,
+);
+
+// === 7. Выбранная SIM ===
+class SelectedSimNotifier extends Notifier<int?> {
+  @override
+  int? build() => null;
+  void set(int? id) => state = id;
+}
+
+final selectedSimProvider = NotifierProvider<SelectedSimNotifier, int?>(
+  SelectedSimNotifier.new,
+);
+
+// === 8. ПОИСК (НОВОЕ) ===
+class SearchQueryNotifier extends Notifier<String> {
+  @override
+  String build() => "";
+  void set(String query) => state = query;
+}
+
+final searchQueryProvider = NotifierProvider<SearchQueryNotifier, String>(
+  SearchQueryNotifier.new,
+);
+
+// === COMPUTED PROVIDERS ===
+
+final apiClientProvider = Provider<ApiClient?>((ref) {
+  final url = ref.watch(serverUrlProvider);
+  final pass = ref.watch(passwordProvider);
+  if (url != null && pass != null) {
+    return ApiClient(url, pass);
+  }
+  return null;
+});
+
+// Базовая группировка сообщений по чатам
+final threadsProvider = Provider<Map<String, List<SmsMessageDto>>>((ref) {
+  final messages = ref.watch(allMessagesProvider);
+  final grouped = <String, List<SmsMessageDto>>{};
+  for (var msg in messages) {
+    if (!grouped.containsKey(msg.address)) grouped[msg.address] = [];
+    grouped[msg.address]!.add(msg);
+  }
+  // Сортировка сообщений внутри чата по времени
+  for (var k in grouped.keys) {
+    grouped[k]!.sort((a, b) => a.date.compareTo(b.date));
+  }
+  return grouped;
+});
+
+// === ОТФИЛЬТРОВАННЫЕ ЧАТЫ (ДЛЯ ПОИСКА) ===
+final filteredThreadsProvider = Provider<Map<String, List<SmsMessageDto>>>((
+  ref,
+) {
+  final allThreads = ref.watch(threadsProvider);
+  final query = ref.watch(searchQueryProvider).toLowerCase().trim();
+
+  if (query.isEmpty) {
+    return allThreads;
+  }
+
+  // Фильтруем чаты
+  final filtered = <String, List<SmsMessageDto>>{};
+
+  for (var entry in allThreads.entries) {
+    final phone = entry.key;
+    final messages = entry.value;
+
+    // 1. Ищем по номеру телефона
+    bool matchPhone = phone.toLowerCase().contains(query);
+
+    // 2. Ищем по тексту сообщений внутри чата
+    bool matchBody = messages.any((m) => m.body.toLowerCase().contains(query));
+
+    if (matchPhone || matchBody) {
+      filtered[phone] = messages;
+    }
+  }
+  return filtered;
+});
+
+// === SYNC LOGIC (FutureProvider) ===
+
+final syncProvider = FutureProvider.autoDispose((ref) async {
+  final api = ref.watch(apiClientProvider);
+  if (api == null) return;
+
+  final audioPlayer = AudioPlayer();
+
+  try {
+    final sims = await api.fetchSims();
+    ref.read(simsProvider.notifier).set(sims);
+
+    final msgs = await api.fetchMessages();
+    ref.read(allMessagesProvider.notifier).set(msgs);
+
+    ref.read(isConnectedProvider.notifier).set(true);
+  } catch (e) {
+    ref.read(isConnectedProvider.notifier).set(false);
+    rethrow;
+  }
+
+  final healthTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+    try {
+      await api.fetchSims();
+    } catch (e) {
+      ref.read(isConnectedProvider.notifier).set(false);
+      timer.cancel();
+    }
+  });
+
+  ref.onDispose(() {
+    healthTimer.cancel();
+    audioPlayer.dispose();
+  });
+
+  final sub = api.connectWs().listen(
+    (data) async {
+      if (data['type'] == 'NEW_SMS') {
+        final msg = SmsMessageDto.fromJson(data['data']);
+        ref.read(allMessagesProvider.notifier).add(msg);
+
+        if (!msg.isSent) {
+          try {
+            await audioPlayer.play(AssetSource('sounds/notification.mp3'));
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+    },
+    onDone: () {
+      ref.read(isConnectedProvider.notifier).set(false);
+    },
+    onError: (e) {
+      ref.read(isConnectedProvider.notifier).set(false);
+    },
+  );
+
+  ref.onDispose(() => sub.cancel());
+});
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\presentation\screens\home_screen.dart"
+--------------------------------------------------------------------------------
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../logic/providers.dart';
+import '../widgets/chat_sidebar.dart';
+import '../widgets/chat_window.dart';
+import 'login_screen.dart'; // Импорт для возврата
+
+class HomeScreen extends ConsumerWidget {
+  const HomeScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 1. Следим за синхронизацией
+    ref.watch(syncProvider);
+
+    // 2. СЛУШАЕМ ПОТЕРЮ СОЕДИНЕНИЯ
+    ref.listen<bool>(isConnectedProvider, (previous, connected) {
+      if (previous == true && connected == false) {
+        // Если мы были подключены и связь пропала
+        _handleDisconnect(context, ref);
+      }
+    });
+
+    final selectedChat = ref.watch(selectedChatIdProvider);
+
+    return Scaffold(
+      backgroundColor: Colors.grey[100],
+      body: Row(
+        children: [
+          Container(
+            width: 350,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              border: Border(right: BorderSide(color: Colors.black12)),
+            ),
+            child: const ChatSidebar(),
+          ),
+          Expanded(
+            child: selectedChat == null
+                ? const EmptyChatState()
+                : ChatWindow(phone: selectedChat),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _handleDisconnect(BuildContext context, WidgetRef ref) {
+    // Останавливаем все процессы
+    ref.read(serverUrlProvider.notifier).set(null);
+    ref.read(passwordProvider.notifier).set(null);
+
+    // Показываем сообщение
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("Связь потеряна. Сервер недоступен."),
+        backgroundColor: Colors.red,
+        duration: Duration(seconds: 5),
+      ),
+    );
+
+    // Вылетаем на главный экран
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const LoginScreen()),
+      (route) => false,
+    );
+  }
+}
+
+// Виджет-заглушка: показывается, когда ни один чат не выбран
+class EmptyChatState extends StatelessWidget {
+  const EmptyChatState({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.chat_bubble_outline,
+            size: 100,
+            color: Colors.grey.withValues(alpha:  0.3),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            "Выберите чат, чтобы начать общение",
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w500,
+              color: Colors.grey[400],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            "Все ваши переписки защищены сквозным шифрованием",
+            style: TextStyle(fontSize: 14, color: Colors.grey[400]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\presentation\screens\login_screen.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'dart:convert';
+import 'package:web/web.dart' as web;
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:uuid/uuid.dart';
+import 'package:http/http.dart' as http;
+import '../../logic/providers.dart';
+import '../../logic/network_scanner.dart';
+import 'home_screen.dart';
+
+class LoginScreen extends ConsumerStatefulWidget {
+  const LoginScreen({super.key});
+  @override
+  ConsumerState<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends ConsumerState<LoginScreen> {
+  String _status = "Инициализация системы...";
+  String? _foundHost;
+  late final String _password;
+  late final String _sessionId;
+  bool _isScanning = true;
+  Timer? _pollingTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _password = const Uuid().v4().substring(0, 8);
+    _sessionId = const Uuid().v4().substring(0, 6);
+    _checkEnvironment();
+  }
+
+  void _checkEnvironment() {
+    if (!kIsWeb) {
+      _startScan();
+      return;
+    }
+
+    final location = web.window.location;
+    final hostname = location.hostname;
+    final protocol = location.protocol;
+    final host = location.host;
+
+    if (hostname.startsWith("192.168.") || hostname.startsWith("10.")) {
+      final hostUrl = "$protocol//$host";
+      setState(() {
+        _foundHost = hostUrl;
+        _isScanning = false;
+        _status = "Сервер найден. Сканируйте QR для входа.";
+      });
+      _startPollingForReadiness(hostUrl);
+    } else {
+      _startScan();
+    }
+  }
+
+  @override
+  void dispose() {
+    _pollingTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _startScan() async {
+    setState(() {
+      _isScanning = true;
+      _foundHost = null;
+      _status = "Поиск телефона в локальной сети...";
+    });
+
+    final host = await NetworkScanner.findHostIP();
+
+    if (mounted) {
+      if (host != null) {
+        setState(() {
+          _foundHost = host;
+          _status = "Телефон обнаружен! Ожидание авторизации...";
+          _isScanning = false;
+        });
+        _startPollingForReadiness(host);
+      } else {
+        setState(() {
+          _status = "Телефон не найден. Убедитесь, что Wi-Fi включен.";
+          _isScanning = false;
+        });
+      }
+    }
+  }
+
+  void _startPollingForReadiness(String host) {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      try {
+        final res = await http.get(Uri.parse('$host/api/ping'));
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          if (data['secured'] == true && data['session_id'] == _sessionId) {
+            timer.cancel();
+            _completePairing();
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _completePairing() {
+    if (_foundHost != null && mounted) {
+      ref.read(serverUrlProvider.notifier).set(_foundHost);
+      ref.read(passwordProvider.notifier).set(_password);
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+      );
+    }
+  }
+
+  void _showManualIpDialog() {
+    final controller = TextEditingController(text: "192.168.");
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Ввести IP вручную"),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: "192.168.x.x",
+            prefixIcon: Icon(Icons.lan),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Отмена")),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              final ip = controller.text.trim();
+              if (ip.isNotEmpty) {
+                var fullUrl = ip;
+                if (!fullUrl.startsWith('http')) fullUrl = "http://$fullUrl";
+                if (!fullUrl.contains(':8080')) fullUrl = "$fullUrl:8080";
+                _checkManualHost(fullUrl);
+              }
+            },
+            child: const Text("Подключить"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _checkManualHost(String host) async {
+    setState(() {
+      _isScanning = true;
+      _status = "Проверка соединения с $host...";
+    });
+
+    try {
+      final res = await http.get(Uri.parse('$host/api/ping')).timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200 && mounted) {
+        setState(() {
+          _foundHost = host;
+          _isScanning = false;
+          _status = "Соединение установлено! Сканируйте QR.";
+        });
+        _startPollingForReadiness(host);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+          _status = "Не удалось подключиться к $host";
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final qrData = jsonEncode({'pass': _password, 'id': _sessionId});
+
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Colors.indigo.shade900, Colors.indigo.shade500],
+          ),
+        ),
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.all(40),
+            constraints: const BoxConstraints(maxWidth: 450),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(30),
+              boxShadow: [
+                BoxShadow(color: Colors.black26, blurRadius: 20, offset: const Offset(0, 10)),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.message_rounded, size: 60, color: Colors.indigo),
+                const SizedBox(height: 20),
+                const Text(
+                  "SMS Web Client",
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, letterSpacing: 1),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _status,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 16),
+                ),
+                const SizedBox(height: 30),
+                if (_isScanning)
+                  const CircularProgressIndicator()
+                else if (_foundHost != null)
+                  Column(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade50,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.grey.shade200),
+                        ),
+                        child: QrImageView(
+                          data: qrData,
+                          size: 200.0,
+                          eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.circle, color: Colors.indigo),
+                          dataModuleStyle: const QrDataModuleStyle(dataModuleShape: QrDataModuleShape.circle, color: Colors.indigo),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Text("Адрес: $_foundHost", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                    ],
+                  )
+                else
+                  Column(
+                    children: [
+                      const Icon(Icons.wifi_off_rounded, size: 80, color: Colors.grey),
+                      const SizedBox(height: 20),
+                      ElevatedButton.icon(
+                        onPressed: _startScan,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text("Повторить поиск"),
+                        style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _showManualIpDialog,
+                        icon: const Icon(Icons.edit),
+                        label: const Text("Ввести IP вручную"),
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\presentation\screens\thread_screen.dart"
+--------------------------------------------------------------------------------
+import 'package:android_host/shared/shared_models.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../logic/providers.dart';
+import '../widgets/message_bubble.dart';
+
+class ThreadScreen extends ConsumerStatefulWidget {
+  final String phone;
+  const ThreadScreen({required this.phone, super.key});
+
+  @override
+  ConsumerState<ThreadScreen> createState() => _ThreadScreenState();
+}
+
+class _ThreadScreenState extends ConsumerState<ThreadScreen> {
+  final _controller = TextEditingController();
+  final _scrollController = ScrollController();
+  int? _selectedSimId;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final sims = ref.read(simsProvider);
+      if (sims.isNotEmpty) {
+        setState(() => _selectedSimId = sims.first.subscriptionId);
+      }
+    });
+  }
+
+  void _scrollToBottom() {
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  void _send() async {
+    final txt = _controller.text.trim();
+    if (txt.isEmpty || _selectedSimId == null) return;
+
+    final api = ref.read(apiClientProvider);
+    try {
+      await api?.sendSms(widget.phone, txt, _selectedSimId!);
+      _controller.clear();
+      Future.delayed(const Duration(milliseconds: 300), _scrollToBottom);
+    } catch (e) {
+     if (!mounted) return; 
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Error: $e")));
+    }
+  }
+
+  String? _getSimName(int? subId, List<SimCardDto> sims) {
+    if (subId == null) return null;
+    try {
+      final s = sims.firstWhere((e) => e.subscriptionId == subId);
+      return "${s.carrierName} (${s.slotIndex + 1})";
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final threads = ref.watch(threadsProvider);
+    final messages = threads[widget.phone] ?? [];
+    final sims = ref.watch(simsProvider);
+
+    // Автоскролл при новом сообщении
+    ref.listen(threadsProvider, (prev, next) {
+      if ((next[widget.phone]?.length ?? 0) >
+          (prev?[widget.phone]?.length ?? 0)) {
+        Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
+      }
+    });
+
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.phone)),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.all(16),
+              itemCount: messages.length,
+              itemBuilder: (ctx, i) => MessageBubble(
+                message: messages[i],
+                simName: _getSimName(messages[i].subId, sims),
+              ),
+            ),
+          ),
+          _buildInputArea(sims),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInputArea(List<SimCardDto> sims) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      color: Colors.white,
+      child: Row(
+        children: [
+          if (sims.isNotEmpty)
+            DropdownButtonHideUnderline(
+              child: DropdownButton<int>(
+                value: _selectedSimId,
+                icon: const Icon(Icons.sim_card),
+                items: sims
+                    .map(
+                      (s) => DropdownMenuItem(
+                        value: s.subscriptionId,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 120),
+                          child: Text(
+                            s.carrierName,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) => setState(() => _selectedSimId = v),
+              ),
+            ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              decoration: const InputDecoration(
+                hintText: "Type a message...",
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.all(Radius.circular(20)),
+                ),
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.send, color: Colors.blue),
+            onPressed: _send,
+          ),
+        ],
+      ),
+    );
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\presentation\widgets\chat_sidebar.dart"
+--------------------------------------------------------------------------------
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../logic/providers.dart';
+
+class ChatSidebar extends ConsumerWidget {
+  const ChatSidebar({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Используем отфильтрованные чаты вместо всех
+    final threads = ref.watch(filteredThreadsProvider);
+    final selectedId = ref.watch(selectedChatIdProvider);
+
+    // Сортировка: новые чаты сверху
+    final sortedNumbers = threads.keys.toList()
+      ..sort((a, b) => threads[b]!.last.date.compareTo(threads[a]!.last.date));
+
+    return Column(
+      children: [
+        // Заголовок и кнопка
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 10),
+          color: Colors.white,
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  const Text(
+                    "Сообщения",
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton.filledTonal(
+                    onPressed: () => _showNewChatDialog(context, ref),
+                    icon: const Icon(Icons.edit_note_rounded),
+                    tooltip: "Новый чат",
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // === ПОЛЕ ПОИСКА ===
+              TextField(
+                onChanged: (val) {
+                  // Обновляем состояние поиска
+                  ref.read(searchQueryProvider.notifier).set(val);
+                },
+                decoration: InputDecoration(
+                  hintText: "Поиск...",
+                  prefixIcon: const Icon(Icons.search, color: Colors.grey),
+                  filled: true,
+                  fillColor: Colors.grey.shade100,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+              // ==================
+            ],
+          ),
+        ),
+
+        const Divider(height: 1, indent: 16, endIndent: 16),
+
+        // Список чатов
+        Expanded(
+          child: sortedNumbers.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.search_off,
+                        size: 48,
+                        color: Colors.grey.shade300,
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        "Ничего не найдено",
+                        style: TextStyle(color: Colors.grey.shade500),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: sortedNumbers.length,
+                  itemBuilder: (ctx, i) {
+                    final phone = sortedNumbers[i];
+                    final lastMsg = threads[phone]!.last;
+                    final isSelected = phone == selectedId;
+
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      child: InkWell(
+                        onTap: () => ref
+                            .read(selectedChatIdProvider.notifier)
+                            .select(phone),
+                        borderRadius: BorderRadius.circular(15),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? Colors.indigo.withValues(alpha: 0.1)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(15),
+                          ),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 26,
+                                backgroundColor: Colors
+                                    .primaries[phone.hashCode %
+                                        Colors.primaries.length]
+                                    .withValues(alpha: 0.2),
+                                child: Text(
+                                  phone.isNotEmpty
+                                      ? phone
+                                            .replaceAll('+', '')
+                                            .substring(0, 1)
+                                            .toUpperCase()
+                                      : "?",
+                                  style: TextStyle(
+                                    color:
+                                        Colors.primaries[phone.hashCode %
+                                            Colors.primaries.length],
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 15),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        // Номер телефона (обрезаем, если длинный)
+                                        Flexible(
+                                          child: Text(
+                                            phone,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          _formatDate(lastMsg.date),
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.grey,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      lastMsg.body,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  String _formatDate(int ms) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+    final now = DateTime.now();
+    if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {
+      return "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}";
+    }
+    return "${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}";
+  }
+
+  void _showNewChatDialog(BuildContext context, WidgetRef ref) {
+    final c = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Новое сообщение"),
+        content: TextField(
+          controller: c,
+          decoration: const InputDecoration(
+            labelText: "Номер телефона",
+            hintText: "+7...",
+          ),
+          keyboardType: TextInputType.phone,
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Отмена"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (c.text.isNotEmpty) {
+                Navigator.pop(ctx);
+                ref.read(selectedChatIdProvider.notifier).select(c.text);
+                // Очищаем поиск при создании нового чата, чтобы его было видно
+                ref.read(searchQueryProvider.notifier).set("");
+              }
+            },
+            child: const Text("Открыть чат"),
+          ),
+        ],
+      ),
+    );
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\presentation\widgets\chat_window.dart"
+--------------------------------------------------------------------------------
+import 'package:android_host/shared/shared_models.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../logic/providers.dart';
+import 'message_bubble.dart';
+
+class ChatWindow extends ConsumerStatefulWidget {
+  final String phone;
+  const ChatWindow({required this.phone, super.key});
+
+  @override
+  ConsumerState<ChatWindow> createState() => _ChatWindowState();
+}
+
+class _ChatWindowState extends ConsumerState<ChatWindow> {
+  final _controller = TextEditingController();
+  final _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _initSim();
+    _scrollToBottom(immediate: true);
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatWindow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.phone != widget.phone) {
+      _initSim();
+      _scrollToBottom(immediate: true);
+    }
+  }
+
+  void _initSim() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final sims = ref.read(simsProvider);
+      final currentSelected = ref.read(selectedSimProvider);
+
+      // Если в списке есть симки, а у нас еще ничего не выбрано — ставим первую
+      if (sims.isNotEmpty && currentSelected == null) {
+        ref.read(selectedSimProvider.notifier).set(sims.first.subscriptionId);
+      }
+    });
+  }
+
+  void _scrollToBottom({bool immediate = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        if (immediate) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        } else {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      }
+    });
+  }
+
+  void _send() async {
+    final txt = _controller.text.trim();
+    final selectedSimId = ref.read(selectedSimProvider); // Берем из провайдера
+
+    if (txt.isEmpty || selectedSimId == null) return;
+
+    final api = ref.read(apiClientProvider);
+    _controller.clear();
+
+    try {
+      await api?.sendSms(widget.phone, txt, selectedSimId);
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Ошибка: $e")));
+    }
+  }
+
+  // Остальные вспомогательные методы (даты) остаются без изменений
+  bool _isSameDay(int ms1, int ms2) =>
+      DateTime.fromMillisecondsSinceEpoch(ms1).day ==
+      DateTime.fromMillisecondsSinceEpoch(ms2).day;
+
+  String _formatDateLabel(int ms) {
+    final date = DateTime.fromMillisecondsSinceEpoch(ms);
+    final now = DateTime.now();
+    if (date.day == now.day && date.month == now.month && date.year == now.year) {
+      return "Сегодня";
+    }
+    return "${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final threads = ref.watch(threadsProvider);
+    final messages = threads[widget.phone] ?? [];
+    final sims = ref.watch(simsProvider);
+    final selectedSimId = ref.watch(
+      selectedSimProvider,
+    ); // Следим за выбранной симкой
+    final int? currentThreadId = messages.isNotEmpty
+        ? messages.first.threadId
+        : null;
+
+    ref.listen(threadsProvider, (prev, next) {
+      if ((next[widget.phone]?.length ?? 0) >
+          (prev?[widget.phone]?.length ?? 0)) {
+        _scrollToBottom();
+      }
+    });
+
+    return Container(
+      color: const Color(0xFFF0F2F5),
+      child: Column(
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)],
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: Colors.indigo.shade50,
+                  child: const Icon(Icons.person, color: Colors.indigo),
+                ),
+                const SizedBox(width: 15),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.phone,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                      const Text(
+                        "Мобильный",
+                        style: TextStyle(
+                          color: Colors.green,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (currentThreadId != null)
+                  IconButton(
+                    icon: const Icon(
+                      Icons.delete_sweep_outlined,
+                      color: Colors.redAccent,
+                    ),
+                    onPressed: () => _deleteThread(currentThreadId),
+                  ),
+              ],
+            ),
+          ),
+
+          // Messages
+          Expanded(
+            child: SelectionArea(
+              child: ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 20,
+                ),
+                itemCount: messages.length,
+                itemBuilder: (ctx, i) {
+                  final msg = messages[i];
+                  bool showDate =
+                      i == 0 || !_isSameDay(messages[i - 1].date, msg.date);
+                  return Column(
+                    children: [
+                      if (showDate)
+                        Container(
+                          margin: const EdgeInsets.symmetric(vertical: 16),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha:  0.08),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            _formatDateLabel(msg.date),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black54,
+                            ),
+                          ),
+                        ),
+                      MessageBubble(
+                        message: msg,
+                        simName: _getSimName(msg.subId, sims),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+
+          // Input Area
+          Container(
+            padding: const EdgeInsets.all(15),
+            color: Colors.white,
+            child: Row(
+              children: [
+                if (sims.isNotEmpty) _buildSimPicker(sims, selectedSimId),
+                const SizedBox(width: 15),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(25),
+                    ),
+                    child: TextField(
+                      controller: _controller,
+                      maxLines: 4,
+                      minLines: 1,
+                      onSubmitted: (_) => _send(),
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        hintText: "Введите сообщение...",
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                IconButton.filled(
+                  onPressed: _send,
+                  icon: const Icon(Icons.send_rounded),
+                  style: IconButton.styleFrom(backgroundColor: Colors.indigo),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSimPicker(List<SimCardDto> sims, int? selectedId) {
+    return PopupMenuButton<int>(
+      onSelected: (id) => ref
+          .read(selectedSimProvider.notifier)
+          .set(id), // Сохраняем в провайдер
+      tooltip: "Выбрать SIM",
+      itemBuilder: (ctx) => sims
+          .map(
+            (s) => PopupMenuItem(
+              value: s.subscriptionId,
+              child: Text("SIM ${s.slotIndex + 1} (${s.carrierName})"),
+            ),
+          )
+          .toList(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.indigo.shade50,
+          borderRadius: BorderRadius.circular(15),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.sim_card_outlined, size: 18, color: Colors.indigo),
+            const SizedBox(width: 5),
+            Text(
+              "SIM ${_getSimSlot(selectedId, sims)}",
+              style: const TextStyle(
+                color: Colors.indigo,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _getSimSlot(int? id, List<SimCardDto> sims) {
+    if (id == null) return "?";
+    final s = sims.where((e) => e.subscriptionId == id);
+    return s.isNotEmpty ? (s.first.slotIndex + 1).toString() : "1";
+  }
+
+  String? _getSimName(int? id, List<SimCardDto> sims) {
+    if (id == null) return null;
+    final s = sims.where((e) => e.subscriptionId == id);
+    return s.isNotEmpty ? s.first.carrierName : null;
+  }
+
+  Future<void> _deleteThread(int threadId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Удалить чат?"),
+        content: const Text(
+          "Эта переписка будет навсегда удалена с вашего телефона.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Отмена"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Удалить"),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await ref.read(apiClientProvider)?.deleteThread(threadId);
+      ref.read(selectedChatIdProvider.notifier).select(null);
+      ref.invalidate(syncProvider);
+    }
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\client\presentation\widgets\message_bubble.dart"
+--------------------------------------------------------------------------------
+import 'package:flutter/material.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:android_host/shared/shared_models.dart';
+
+class MessageBubble extends StatelessWidget {
+  final SmsMessageDto message;
+  final String? simName;
+
+  const MessageBubble({super.key, required this.message, this.simName});
+
+  @override
+  Widget build(BuildContext context) {
+    final isMe = message.isSent;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.6,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: isMe ? Colors.indigo : Colors.white,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(18),
+              topRight: const Radius.circular(18),
+              bottomLeft: Radius.circular(isMe ? 18 : 4),
+              bottomRight: Radius.circular(isMe ? 4 : 18),
+            ),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black12,
+                blurRadius: 4,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Linkify(
+                text: message.body,
+                onOpen: (link) => launchUrl(Uri.parse(link.url)),
+                style: TextStyle(
+                  color: isMe ? Colors.white : Colors.black87,
+                  fontSize: 15,
+                ),
+                linkStyle: TextStyle(
+                  color: isMe ? Colors.cyanAccent : Colors.indigo,
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (simName != null) ...[
+                    Text(
+                      simName!.toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: isMe ? Colors.white70 : Colors.indigo.shade300,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Text(
+                    _formatTime(message.date),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isMe ? Colors.white60 : Colors.grey,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatTime(int ms) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+    return "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}";
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\data\native_sms_client.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'package:flutter/services.dart';
+import '../../shared/shared_models.dart';
+
+class NativeSmsClient {
+  static const _methodChannel = MethodChannel('com.example.sms_host/methods');
+  static const _eventChannel = EventChannel('com.example.sms_host/events');
+  
+  Stream<SmsMessageDto> get onSmsReceived {
+    return _eventChannel.receiveBroadcastStream().map((dynamic event) {
+      final map = Map<String, dynamic>.from(event);
+      return SmsMessageDto(
+        address: map['address'] ?? 'Unknown',
+        body: map['body'] ?? '',
+        date: map['date'] is int ? map['date'] : DateTime.now().millisecondsSinceEpoch,
+        isSent: false,
+        subId: map['subId'],
+      );
+    });
+  }
+
+  Future<List<SimCardDto>> getSimCards() async {
+    try {
+      final List<dynamic> result = await _methodChannel.invokeMethod('getSimCards');
+      return result.map((data) {
+        final map = Map<String, dynamic>.from(data);
+        return SimCardDto(
+          subscriptionId: map['subscriptionId'],
+          slotIndex: map['slotIndex'],
+          carrierName: map['carrierName'] ?? "Unknown",
+        );
+      }).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  Future<void> sendSms(String address, String body, int subId) async {
+    await _methodChannel.invokeMethod('sendSms', {
+      'address': address,
+      'body': body,
+      'subId': subId,
+    });
+  }
+  
+  Future<List<SmsMessageDto>> getFullHistory() async {
+    try {
+      final List<dynamic> result = await _methodChannel.invokeMethod('getAllMessages');
+      return result.map((data) {
+        final map = Map<String, dynamic>.from(data);
+        return SmsMessageDto(
+          id: map['id'],             // ID
+          threadId: map['threadId'], // ID диалога
+          address: map['address'] ?? 'Unknown',
+          body: map['body'] ?? '',
+          date: map['date'] ?? DateTime.now().millisecondsSinceEpoch,
+          isSent: map['isSent'] == true,
+          subId: map['subId'],
+        );
+      }).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // === МЕТОДЫ УДАЛЕНИЯ ===
+  Future<void> deleteMessage(int id) async {
+    await _methodChannel.invokeMethod('deleteSms', {'id': id});
+  }
+
+  Future<void> deleteThread(int threadId) async {
+    await _methodChannel.invokeMethod('deleteThread', {'threadId': threadId});
+  }
+}.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\presentation\qr_scan_screen.dart"
+--------------------------------------------------------------------------------
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+
+class QrScanScreen extends StatefulWidget {
+  const QrScanScreen({super.key});
+
+  @override
+  State<QrScanScreen> createState() => _QrScanScreenState();
+}
+
+class _QrScanScreenState extends State<QrScanScreen> {
+  // Контроллер для управления камерой
+  final MobileScannerController _controller = MobileScannerController();
+  bool _isScanned = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_isScanned) return;
+
+    final List<Barcode> barcodes = capture.barcodes;
+    for (final barcode in barcodes) {
+      final String? rawValue = barcode.rawValue;
+      if (rawValue != null) {
+        debugPrint('QR Code detected: $rawValue'); // Видно в консоли
+
+        try {
+          final data = jsonDecode(rawValue);
+
+          // Проверяем наличие наших ключей из Веб-приложения
+          if (data is Map &&
+              data.containsKey('pass') &&
+              data.containsKey('id')) {
+            _isScanned = true;
+
+            // Останавливаем камеру перед выходом
+            _controller.stop();
+
+            debugPrint('Valid QR Data found: $data');
+
+            // Возвращаем результат обратно в main.dart
+            Navigator.pop(context, {
+              'pass': data['pass'].toString(),
+              'id': data['id'].toString(),
+            });
+            return;
+          }
+        } catch (e) {
+          // Если это не JSON или в нем нет нужных полей, просто игнорируем
+          debugPrint('Scanned QR is not a valid JSON: $e');
+        }
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Scan Web QR"),
+        backgroundColor: Colors.indigo,
+        foregroundColor: Colors.white,
+      ),
+      body: Stack(
+        children: [
+          // Сам сканер
+          MobileScanner(controller: _controller, onDetect: _onDetect),
+
+          // Рамка визуального наведения
+          Center(
+            child: Container(
+              width: 250,
+              height: 250,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white, width: 2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+
+          // Подсказка снизу
+          Positioned(
+            bottom: 50,
+            left: 0,
+            right: 0,
+            child: const Center(
+              child: Text(
+                "Point your camera at the PC screen",
+                style: TextStyle(
+                  color: Colors.white,
+                  backgroundColor: Colors.black45,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\presentation\screens\chat_screen.dart"
+--------------------------------------------------------------------------------
+import 'package:android_host/shared/shared_models.dart';
+import 'package:flutter/material.dart';
+import '../../server/server_manager.dart';
+import 'package:flutter_linkify/flutter_linkify.dart'; // Добавить
+import 'package:url_launcher/url_launcher.dart';    // Добавить
+
+class ChatScreen extends StatefulWidget {
+  final String address;
+  final ServerManager serverManager;
+
+  const ChatScreen({
+    super.key,
+    required this.address,
+    required this.serverManager,
+  });
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  List<SmsMessageDto> _messages = [];
+  List<SimCardDto> _sims = [];
+  int? _selectedSimId;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    // 1. Загружаем симки
+    final sims = await widget.serverManager.smsClient.getSimCards();
+
+    // 2. Загружаем историю
+    final allMsgs = await widget.serverManager.smsClient.getFullHistory();
+    // Фильтруем только для этого чата и сортируем
+    final chatMsgs = allMsgs.where((m) => m.address == widget.address).toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+
+    if (mounted) {
+      setState(() {
+        _sims = sims;
+        if (_sims.isNotEmpty) _selectedSimId = _sims.first.subscriptionId;
+        _messages = chatMsgs;
+        _isLoading = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _selectedSimId == null) return;
+
+    try {
+      await widget.serverManager.smsClient.sendSms(
+        widget.address,
+        text,
+        _selectedSimId!,
+      );
+
+      _controller.clear();
+
+      // Добавляем сообщение локально для быстрого UI
+      setState(() {
+        _messages.add(
+          SmsMessageDto(
+            address: widget.address,
+            body: text,
+            date: DateTime.now().millisecondsSinceEpoch,
+            isSent: true,
+            subId: _selectedSimId,
+          ),
+        );
+      });
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Error: $e")));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.address),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        elevation: 1,
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _messages.length,
+                    itemBuilder: (ctx, i) {
+                      final msg = _messages[i];
+                      return Align(
+                        alignment: msg.isSent
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: msg.isSent
+                                ? Colors.indigo
+                                : Colors.grey[200],
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          constraints: BoxConstraints(
+                            maxWidth: MediaQuery.of(context).size.width * 0.75,
+                          ),
+                          child: SelectionArea(
+                            // Добавляем возможность выделения
+                            child: Linkify(
+                              onOpen: (link) async =>
+                                  await launchUrl(Uri.parse(link.url)),
+                              text: msg.body,
+                              style: TextStyle(
+                                color: msg.isSent ? Colors.white : Colors.black,
+                              ),
+                              linkStyle: TextStyle(
+                                color: msg.isSent ? Colors.amber : Colors.blue,
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          _buildInputArea(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInputArea() {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      color: Colors.white,
+      child: Row(
+        children: [
+          if (_sims.length > 1)
+            DropdownButtonHideUnderline(
+              child: DropdownButton<int>(
+                value: _selectedSimId,
+                items: _sims
+                    .map(
+                      (s) => DropdownMenuItem(
+                        value: s.subscriptionId,
+                        child: Text(
+                          "SIM ${s.slotIndex + 1}",
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) => setState(() => _selectedSimId = v),
+              ),
+            ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              decoration: const InputDecoration(
+                hintText: "SMS...",
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.all(Radius.circular(20)),
+                ),
+                contentPadding: EdgeInsets.symmetric(horizontal: 16),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.send, color: Colors.indigo),
+            onPressed: _sendMessage,
+          ),
+        ],
+      ),
+    );
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\presentation\screens\inbox_screen.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'package:android_host/shared/shared_models.dart';
+import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../../server/server_manager.dart';
+import '../widgets/server_control_panel.dart'; // "Спрятанный" функционал
+import 'chat_screen.dart'; // Экран чата
+
+class InboxScreen extends StatefulWidget {
+  const InboxScreen({super.key});
+
+  @override
+  State<InboxScreen> createState() => _InboxScreenState();
+}
+
+class _InboxScreenState extends State<InboxScreen> {
+  // Менеджер сервера живет здесь
+  final ServerManager _serverManager = ServerManager();
+
+  List<SmsMessageDto> _messages = [];
+  bool _isLoading = true;
+  StreamSubscription? _smsSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _initApp();
+  }
+
+  @override
+  void dispose() {
+    _smsSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _initApp() async {
+    // 1. Запрос прав
+    await [
+      Permission.sms,
+      Permission.phone,
+      Permission.contacts,
+      Permission.notification,
+      Permission.locationWhenInUse,
+    ].request();
+
+    // 2. Загрузка истории
+    await _loadMessages();
+
+    // 3. Подписка на новые SMS (чтобы список обновлялся в реальном времени)
+    // Доступ к NativeClient через ServerManager (нужно сделать геттер или сделать поле public)
+    // Для простоты предполагаем, что у ServerManager есть геттер smsClient
+    _smsSubscription = _serverManager.smsClient.onSmsReceived.listen((msg) {
+      if (mounted) {
+        setState(() {
+          _messages.insert(0, msg);
+        });
+      }
+    });
+  }
+
+  Future<void> _loadMessages() async {
+    setState(() => _isLoading = true);
+    final msgs = await _serverManager.smsClient.getFullHistory();
+    if (mounted) {
+      setState(() {
+        _messages = msgs;
+        _isLoading = false;
+      });
+    }
+  }
+
+  // Группировка сообщений по номерам для списка диалогов
+  Map<String, SmsMessageDto> _getThreads() {
+    final Map<String, SmsMessageDto> threads = {};
+    // Проходим по сообщениям, сохраняем только последнее для каждого номера
+    for (var msg in _messages) {
+      if (!threads.containsKey(msg.address)) {
+        threads[msg.address] = msg;
+      }
+    }
+    return threads;
+  }
+
+  void _openServerControls() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ServerControlPanel(serverManager: _serverManager),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final threads = _getThreads();
+    final sortedAddresses = threads.keys.toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Messages"),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        elevation: 1,
+        actions: [
+          // КНОПКА СИНХРОНИЗАЦИИ (Спрятанный функционал)
+          IconButton(
+            icon: const Icon(Icons.phonelink_ring, color: Colors.indigo),
+            tooltip: "Sync with Web",
+            onPressed: _openServerControls,
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _loadMessages,
+              child: sortedAddresses.isEmpty
+                  ? const Center(child: Text("No messages"))
+                  : ListView.builder(
+                      itemCount: sortedAddresses.length,
+                      itemBuilder: (ctx, i) {
+                        final address = sortedAddresses[i];
+                        final lastMsg = threads[address]!;
+
+                        // ДОБАВЛЯЕМ DISMISSIBLE ДЛЯ УДАЛЕНИЯ СВАЙПОМ
+                        return Dismissible(
+                          key: Key(address),
+                          direction: DismissDirection.endToStart,
+                          background: Container(
+                            color: Colors.red,
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            child: const Icon(
+                              Icons.delete,
+                              color: Colors.white,
+                            ),
+                          ),
+                          confirmDismiss: (dir) async {
+                            return await showDialog(
+                              context: context,
+                              builder: (ctx) => AlertDialog(
+                                title: const Text("Delete Chat?"),
+                                content: const Text(
+                                  "This will delete all messages in this conversation.",
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx, false),
+                                    child: const Text("Cancel"),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx, true),
+                                    child: const Text(
+                                      "Delete",
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                          onDismissed: (_) async {
+                            if (lastMsg.threadId != null) {
+                              try {
+                                await _serverManager.smsClient.deleteThread(
+                                  lastMsg.threadId!,
+                                );
+                                _loadMessages(); // Перезагружаем список
+                              } catch (e) {
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      "Error: Make sure app is Default SMS App",
+                                    ),
+                                  ),
+                                );
+                                _loadMessages(); // Возвращаем, если ошибка
+                              }
+                            }
+                          },
+                          child: ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: Colors.indigo.shade100,
+                              child: const Icon(
+                                Icons.person,
+                                color: Colors.indigo,
+                              ),
+                            ),
+                            title: Text(
+                              address,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            subtitle: Text(
+                              lastMsg.body,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Text(
+                              _formatDate(lastMsg.date),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                              ),
+                            ),
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => ChatScreen(
+                                    address: address,
+                                    serverManager: _serverManager,
+                                  ),
+                                ),
+                              ).then((_) => _loadMessages());
+                            },
+                          ),
+                        );
+                      },
+                    ),
+            ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          // Логика создания нового чата (можно добавить позже)
+        },
+        backgroundColor: Colors.indigo,
+        child: const Icon(Icons.message),
+      ),
+    );
+  }
+
+  String _formatDate(int ms) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+    return "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}";
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\presentation\widgets\server_control_panel.dart"
+--------------------------------------------------------------------------------
+import 'package:flutter/material.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import '../../server/server_manager.dart';
+import '../qr_scan_screen.dart';
+
+class ServerControlPanel extends StatefulWidget {
+  final ServerManager serverManager;
+  const ServerControlPanel({super.key, required this.serverManager});
+
+  @override
+  State<ServerControlPanel> createState() => _ServerControlPanelState();
+}
+
+class _ServerControlPanelState extends State<ServerControlPanel> {
+  String _status = "Готов к работе";
+  String? _serverUrl;
+  bool _isRunning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // СИНХРОНИЗАЦИЯ: Подхватываем реальное состояние из долгоживущего ServerManager
+    _isRunning = widget.serverManager.isRunning;
+    _serverUrl = widget.serverManager.currentUrl;
+
+    if (_isRunning) {
+      if (widget.serverManager.isSecured) {
+        _status = "ЗАЩИЩЕНО И ПОДКЛЮЧЕНО";
+      } else {
+        _status = "Сервер активен";
+      }
+    }
+  }
+
+  Future<void> _startServer() async {
+    setState(() => _status = "Запуск...");
+    try {
+      final service = FlutterBackgroundService();
+      // Запускаем фоновый сервис Android, чтобы сервер не убила система
+      if (!await service.isRunning()) await service.startService();
+
+      final url = await widget.serverManager.start();
+      setState(() {
+        _isRunning = true;
+        _serverUrl = url;
+        _status = "Сервер активен";
+      });
+    } catch (e) {
+      setState(() => _status = "Ошибка: $e");
+    }
+  }
+
+  void _stopServer() {
+    widget.serverManager.stop();
+    FlutterBackgroundService().invoke("stopService");
+    setState(() {
+      _isRunning = false;
+      _serverUrl = null;
+      _status = "Сервер остановлен";
+    });
+  }
+
+  Future<void> _scanQr() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const QrScanScreen()),
+    );
+
+    if (result != null && result is Map) {
+      widget.serverManager.updatePassword(result['pass'], result['id']);
+      setState(() => _status = "ЗАЩИЩЕНО И ПОДКЛЮЧЕНО");
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Сопряжение выполнено!"),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Полоска-индикатор для смахивания вниз
+          Container(
+            width: 40,
+            height: 4,
+            color: Colors.grey[300],
+            margin: const EdgeInsets.only(bottom: 20),
+          ),
+          const Text(
+            "Веб-синхронизация",
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 20),
+
+          // Блок с адресами сервера (показываем только если запущен)
+          if (_serverUrl != null)
+            Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.green[50],
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.green.withValues(alpha: 0.3)),
+                  ),
+                  child: Column(
+                    children: [
+                      const Text(
+                        "Локальный адрес:",
+                        style: TextStyle(fontSize: 12, color: Colors.green),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        "http://sms-host.local:8080",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const Divider(),
+                      Text(
+                        "IP адрес: $_serverUrl",
+                        style: TextStyle(
+                          color: Colors.green[800],
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+              ],
+            ),
+
+          Text(
+            _status,
+            style: TextStyle(
+              color: _status.contains("ЗАЩИЩЕНО")
+                  ? Colors.green
+                  : Colors.grey[600],
+              fontWeight: _status.contains("ЗАЩИЩЕНО")
+                  ? FontWeight.bold
+                  : FontWeight.normal,
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // Кнопки управления в зависимости от состояния
+          if (!_isRunning)
+            ElevatedButton.icon(
+              icon: const Icon(Icons.play_arrow),
+              label: const Text("ЗАПУСТИТЬ СЕРВЕР"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.indigo,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 50),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: _startServer,
+            )
+          else ...[
+            ElevatedButton.icon(
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text("СВЯЗАТЬ С БРАУЗЕРОМ"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 50),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: _scanQr,
+            ),
+            const SizedBox(height: 10),
+            TextButton.icon(
+              icon: const Icon(Icons.stop, size: 18),
+              label: const Text("Остановить сервер"),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              onPressed: _stopServer,
+            ),
+          ],
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\server\http_router.dart"
+--------------------------------------------------------------------------------
+import 'dart:convert';
+import 'dart:io';
+import 'dart:async';
+import 'package:shelf/shelf.dart';
+import 'package:shelf_router/shelf_router.dart';
+import 'package:shelf_web_socket/shelf_web_socket.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import '../data/native_sms_client.dart';
+import '../../shared/shared_models.dart';
+import '../../shared/security_service.dart';
+
+class HttpRouter {
+  final NativeSmsClient _smsClient;
+  SecurityService _security;
+  final String _webRootPath;
+  final List<WebSocketChannel> _sockets = [];
+
+  // Индекс файлов для быстрого поиска и обхода проблем с путями Windows
+  final Map<String, File> _fileIndex = {};
+
+  bool _isSecured = false;
+  String? _currentSessionId;
+
+  HttpRouter(this._smsClient, this._security, this._webRootPath) {
+    _smsClient.onSmsReceived.listen(broadcast);
+  }
+
+  // Сканируем файлы один раз при старте
+  Future<void> initialize() async {
+    _fileIndex.clear();
+    final dir = Directory(_webRootPath);
+    if (!await dir.exists()) return;
+
+    try {
+      await for (final entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          // Получаем путь относительно папки web_root и нормализуем слеши
+          final relPath = entity.path
+              .substring(_webRootPath.length + 1)
+              .replaceAll('\\', '/');
+
+          final fileName = entity.path.split(Platform.pathSeparator).last;
+
+          _fileIndex[relPath] = entity;
+          // Позволяет найти файл просто по имени (например, для шрифтов)
+          _fileIndex.putIfAbsent(fileName, () => entity);
+        }
+      }
+      stdout.writeln("Server indexed ${_fileIndex.length} files.");
+    } catch (e) {
+      stdout.writeln("Indexing error: $e");
+    }
+  }
+
+  void updateSecurity(String password, String sessionId) {
+    _security = SecurityService(password);
+    _currentSessionId = sessionId;
+    _isSecured = true;
+  }
+
+  void broadcast(SmsMessageDto msg) {
+    if (_sockets.isEmpty) return;
+    try {
+      final encrypted = _security.encrypt({
+        'type': 'NEW_SMS',
+        'data': msg.toJson(),
+      });
+      for (var ws in _sockets) {
+        try {
+          ws.sink.add(encrypted);
+        } catch (_) {}
+      }
+    } catch (e) {
+      stdout.writeln("Broadcast error: $e");
+    }
+  }
+
+  Handler get handler {
+    final router = Router();
+
+    // API Routes
+    router.get(
+      '/api/ping',
+      (Request req) => Response.ok(
+        jsonEncode({
+          'status': 'alive',
+          'secured': _isSecured,
+          'session_id': _currentSessionId,
+        }),
+        headers: {'Content-Type': 'application/json'},
+      ),
+    );
+
+    router.get('/api/sims', (Request req) async {
+      final sims = await _smsClient.getSimCards();
+      return _encryptedRes(sims.map((e) => e.toJson()).toList());
+    });
+
+    router.get('/api/messages', (Request req) async {
+      final msgs = await _smsClient.getFullHistory();
+      return _encryptedRes(msgs.map((e) => e.toJson()).toList());
+    });
+
+    router.post('/api/send', (Request req) async {
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+
+      final address = data['address'];
+      final body = data['body'];
+      final subId = data['subId'] ?? 0;
+
+      // 1. Отправляем физическое SMS через нативный клиент
+      await _smsClient.sendSms(address, body, subId);
+
+      // 2. Создаем объект сообщения для обновления UI в вебе
+      final newMsg = SmsMessageDto(
+        address: address,
+        body: body,
+        date: DateTime.now().millisecondsSinceEpoch,
+        isSent: true, // Это исходящее
+        subId: subId,
+      );
+
+      // 3. Рассылаем через WebSocket всем подключенным клиентам
+      broadcast(newMsg);
+
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.get('/ws', (Request req) {
+      return webSocketHandler((WebSocketChannel ws, _) {
+        _sockets.add(ws);
+        ws.stream.listen((_) {}, onDone: () => _sockets.remove(ws));
+      })(req);
+    });
+
+    // Static Files Catch-all
+    router.get('/<ignored|.*>', _handleStatic);
+
+    // Pipeline с исправленным Middleware
+    return const Pipeline()
+        .addMiddleware(_corsMiddleware())
+        .addHandler(router.call);
+  }
+
+  Future<Response> _handleStatic(Request req) async {
+    String path = req.url.path;
+    if (path.startsWith('/')) path = path.substring(1);
+    path = Uri.decodeComponent(path);
+    if (path.isEmpty) path = 'index.html';
+
+    // Ищем в индексе (сначала по полному пути, потом по имени файла)
+    File? file = _fileIndex[path] ?? _fileIndex[path.split('/').last];
+
+    if (file != null && await file.exists()) {
+      final bytes = await file.readAsBytes();
+      final name = file.path.toLowerCase();
+      String mime = 'text/plain';
+
+      if (name.endsWith('.html')) {
+        mime = 'text/html; charset=utf-8';
+      } else if (name.endsWith('.js')) {
+        mime = 'application/javascript';
+      } else if (name.endsWith('.css')) {
+        mime = 'text/css';
+      } else if (name.endsWith('.json')) {
+        mime = 'application/json';
+      } else if (name.endsWith('.otf')) {
+        mime = 'font/otf';
+      } else if (name.endsWith('.ttf')) {
+        mime = 'font/ttf';
+      } else if (name.endsWith('.wasm')) {
+        mime = 'application/wasm';
+      }
+
+      return Response.ok(bytes, headers: {'Content-Type': mime});
+    }
+
+    // Если файл не найден, но есть index.html (для SPA)
+    if (_fileIndex.containsKey('index.html')) {
+      final bytes = await _fileIndex['index.html']!.readAsBytes();
+      return Response.ok(bytes, headers: {'Content-Type': 'text/html'});
+    }
+
+    return Response.notFound('Not found');
+  }
+
+  Response _encryptedRes(dynamic data) => Response.ok(
+    _security.encrypt(data),
+    headers: {'Content-Type': 'text/plain'},
+  );
+
+  static const _corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': '*',
+    'Access-Control-Allow-Private-Network': 'true',
+  };
+
+  // ИСПРАВЛЕННЫЙ Middleware
+  static Middleware _corsMiddleware() {
+    return (Handler innerHandler) {
+      return (Request request) async {
+        if (request.method == 'OPTIONS') {
+          return Response.ok('', headers: _corsHeaders);
+        }
+        final response = await innerHandler(request);
+        return response.change(headers: _corsHeaders);
+      };
+    };
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\server\server_manager.dart"
+--------------------------------------------------------------------------------
+import 'dart:io';
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:path_provider/path_provider.dart';
+import 'package:archive/archive.dart';
+import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:nsd/nsd.dart';
+import '../data/native_sms_client.dart';
+import 'http_router.dart';
+import '../../shared/security_service.dart';
+
+class ServerManager {
+  HttpServer? _server;
+  final NativeSmsClient _smsClient = NativeSmsClient();
+  HttpRouter? _router;
+  Registration? _registration;
+
+  // Поля для сохранения состояния между открытиями UI
+  String? _currentUrl;
+  bool _isSecured = false;
+
+  NativeSmsClient get smsClient => _smsClient;
+
+  // Геттеры для проверки состояния из виджетов
+  bool get isRunning => _server != null;
+  String? get currentUrl => _currentUrl;
+  bool get isSecured => _isSecured;
+
+  Future<String> start() async {
+    // Если сервер уже запущен, просто возвращаем текущий URL
+    if (_server != null) return _currentUrl!;
+
+    final staticPath = await _prepareWebAssets();
+
+    // Начальный пароль для ожидания сканирования QR
+    final security = SecurityService("waiting_for_qr");
+    _router = HttpRouter(_smsClient, security, staticPath);
+
+    // Индексируем файлы (наш фикс для иконок)
+    await _router!.initialize();
+
+    String ip = '0.0.0.0';
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+      for (var interface in interfaces) {
+        for (var addr in interface.addresses) {
+          if (addr.address.startsWith('192.168.') ||
+              addr.address.startsWith('10.')) {
+            ip = addr.address;
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+
+    _server = await shelf_io.serve(_router!.handler, ip, 8080, shared: true);
+    _currentUrl = 'http://$ip:${_server!.port}';
+    _isSecured = false; // Сбрасываем статус защиты при новом запуске
+
+    await _registerMdnsService();
+
+    return _currentUrl!;
+  }
+
+  Future<void> _registerMdnsService() async {
+    try {
+      const String serviceName = 'sms-host';
+      _registration = await register(
+        const Service(name: serviceName, type: '_http._tcp', port: 8080),
+      );
+    } catch (e) {
+      stdout.writeln("mDNS registration error: $e");
+    }
+  }
+
+  Future<void> _unregisterMdns() async {
+    if (_registration != null) {
+      try {
+        await unregister(_registration!);
+        _registration = null;
+      } catch (e) {
+        stdout.writeln("mDNS unregistration error: $e");
+      }
+    }
+  }
+
+  Future<String> _prepareWebAssets() async {
+    final docDir = await getApplicationDocumentsDirectory();
+    final webDir = Directory('${docDir.path}/web_root');
+
+    if (await webDir.exists()) {
+      await webDir.delete(recursive: true);
+    }
+    await webDir.create(recursive: true);
+
+    try {
+      final zipData = await rootBundle.load('assets/web.zip');
+      final bytes = zipData.buffer.asUint8List();
+      final archive = ZipDecoder().decodeBytes(bytes);
+
+      for (final file in archive) {
+        // Фикс путей Windows для Android
+        final fixedName = file.name.replaceAll('\\', '/');
+        final fullPath = '${webDir.path}/$fixedName';
+
+        if (file.isFile) {
+          final outFile = File(fullPath);
+          await outFile.parent.create(recursive: true);
+          await outFile.writeAsBytes(file.content as List<int>);
+        } else {
+          await Directory(fullPath).create(recursive: true);
+        }
+      }
+      stdout.writeln("Assets unpacked successfully.");
+    } catch (e) {
+      stdout.writeln("Unzip error: $e");
+    }
+    return webDir.path;
+  }
+
+  void updatePassword(String newPassword, String sessionId) {
+    _router?.updateSecurity(newPassword, sessionId);
+    _isSecured = true; // Запоминаем, что QR успешно отсканирован
+  }
+
+  void stop() {
+    _unregisterMdns();
+    _server?.close();
+    _server = null;
+    _currentUrl = null;
+    _isSecured = false;
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\host\service\background_service_logic.dart"
+--------------------------------------------------------------------------------
+import 'dart:async';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+Future<void> initializeBackgroundService() async {
+  final service = FlutterBackgroundService();
+
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'sms_server_channel',
+    'SMS Server Service',
+    importance: Importance.low,
+  );
+
+  await FlutterLocalNotificationsPlugin()
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >()
+      ?.createNotificationChannel(channel);
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: false,
+      isForegroundMode: true,
+      notificationChannelId: 'sms_server_channel',
+      initialNotificationTitle: 'SMS Server Running',
+      initialNotificationContent: 'Ready to sync...',
+    ),
+    iosConfiguration: IosConfiguration(),
+  );
+}
+
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  service.on('stopService').listen((event) {
+    service.stopSelf();
+  });
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\shared\security_service.dart"
+--------------------------------------------------------------------------------
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
+import 'package:encrypt/encrypt.dart';
+import 'dart:typed_data';
+
+class SecurityService {
+  late final Key _key;
+  late final IV _iv;
+  late final Encrypter _encrypter;
+
+  SecurityService(String password) {
+    final passBytes = utf8.encode(password);
+
+    // Ключ 32 байта из SHA-256
+    final keyDigest = sha256.convert(passBytes);
+    _key = Key(Uint8List.fromList(keyDigest.bytes));
+
+    // IV 16 байт из MD5 (теперь он всегда одинаковый для одного пароля)
+    final ivDigest = md5.convert(passBytes);
+    _iv = IV(Uint8List.fromList(ivDigest.bytes));
+
+    _encrypter = Encrypter(AES(_key, mode: AESMode.cbc));
+  }
+
+  String encrypt(dynamic json) {
+    final jsonString = jsonEncode(json);
+    return _encrypter.encrypt(jsonString, iv: _iv).base64;
+  }
+
+  dynamic decrypt(String encryptedBase64) {
+    try {
+      final decrypted = _encrypter.decrypt64(encryptedBase64, iv: _iv);
+      return jsonDecode(decrypted);
+    } catch (e) {
+      throw Exception("Decryption failed. Check session/password.");
+    }
+  }
+}
+.
+.
+--------------------------------------------------------------------------------
+Путь к файлу: "E:\projects\android_host\lib\shared\shared_models.dart"
+--------------------------------------------------------------------------------
+// lib/shared/shared_models.dart
+
+class SmsMessageDto {
+  final int? id;        // Уникальный ID сообщения в базе Android
+  final int? threadId;  // ID цепочки (диалога)
+  final String address;
+  final String body;
+  final int date;
+  final bool isSent;
+  final int? subId;
+
+  SmsMessageDto({
+    this.id,
+    this.threadId,
+    required this.address,
+    required this.body,
+    required this.date,
+    required this.isSent,
+    this.subId,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'threadId': threadId,
+    'address': address,
+    'body': body,
+    'date': date,
+    'isSent': isSent,
+    'subId': subId,
+  };
+
+  factory SmsMessageDto.fromJson(Map<String, dynamic> json) {
+    return SmsMessageDto(
+      id: json['id'],
+      threadId: json['threadId'],
+      address: json['address'],
+      body: json['body'],
+      date: json['date'],
+      isSent: json['isSent'],
+      subId: json['subId'],
+    );
+  }
+}
+
+class SimCardDto {
+  final int subscriptionId;
+  final int slotIndex;
+  final String carrierName;
+
+  SimCardDto({
+    required this.subscriptionId,
+    required this.slotIndex,
+    required this.carrierName,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'subscriptionId': subscriptionId,
+    'slotIndex': slotIndex,
+    'carrierName': carrierName,
+  };
+
+  factory SimCardDto.fromJson(Map<String, dynamic> json) {
+    return SimCardDto(
+      subscriptionId: json['subscriptionId'],
+      slotIndex: json['slotIndex'],
+      carrierName: json['carrierName'],
+    );
+  }
+}.
