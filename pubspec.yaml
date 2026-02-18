@@ -44,6 +44,7 @@ dependencies:
   archive: ^4.0.7            # Для распаковки web.zip
   path_provider: ^2.1.1
   mobile_scanner: ^7.1.4     # Для сканирования QR (на телефоне)
+  network_info_plus: ^5.0.3
 
   # === Web / Client зависимости ===
   http: ^1.2.0

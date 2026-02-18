@@ -14,6 +14,7 @@ class ServerControlPanel extends StatefulWidget {
 class _ServerControlPanelState extends State<ServerControlPanel> {
   String _status = "Готов к работе";
   String? _serverUrl;
+  String? _wifiName;
   bool _isRunning = false;
 
   @override
@@ -22,6 +23,7 @@ class _ServerControlPanelState extends State<ServerControlPanel> {
     // СИНХРОНИЗАЦИЯ: Подхватываем реальное состояние из долгоживущего ServerManager
     _isRunning = widget.serverManager.isRunning;
     _serverUrl = widget.serverManager.currentUrl;
+    _wifiName = widget.serverManager.wifiName;
 
     if (_isRunning) {
       if (widget.serverManager.isSecured) {
@@ -36,13 +38,14 @@ class _ServerControlPanelState extends State<ServerControlPanel> {
     setState(() => _status = "Запуск...");
     try {
       final service = FlutterBackgroundService();
-      // Запускаем фоновый сервис Android, чтобы сервер не убила система
       if (!await service.isRunning()) await service.startService();
 
       final url = await widget.serverManager.start();
       setState(() {
         _isRunning = true;
         _serverUrl = url;
+        _wifiName =
+            widget.serverManager.wifiName; // Обновляем имя сети после запуска
         _status = "Сервер активен";
       });
     } catch (e) {
@@ -56,6 +59,7 @@ class _ServerControlPanelState extends State<ServerControlPanel> {
     setState(() {
       _isRunning = false;
       _serverUrl = null;
+      _wifiName = null;
       _status = "Сервер остановлен";
     });
   }
@@ -113,22 +117,40 @@ class _ServerControlPanelState extends State<ServerControlPanel> {
                   decoration: BoxDecoration(
                     color: Colors.green[50],
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.green.withValues(alpha: 0.3)),
+                    border: Border.all(
+                      color: Colors.green.withValues(alpha: 0.3),
+                    ),
                   ),
                   child: Column(
                     children: [
-                      const Text(
-                        "Локальный адрес:",
-                        style: TextStyle(fontSize: 12, color: Colors.green),
-                      ),
-                      const SizedBox(height: 4),
-                      const Text(
-                        "http://sms-host.local:8080",
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.green,
-                          fontSize: 16,
+                      if (_wifiName != null) ...[
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(
+                              Icons.wifi,
+                              size: 16,
+                              color: Colors.green,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _wifiName!,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.green,
+                              ),
+                            ),
+                          ],
                         ),
+                        const SizedBox(height: 8),
+                        const Divider(),
+                        const SizedBox(height: 8),
+                      ],
+
+                      // ======================================
+                      const Text(
+                        "Локальный адрес (для браузера):",
+                        style: TextStyle(fontSize: 12, color: Colors.green),
                       ),
                       const Divider(),
                       Text(

@@ -40,7 +40,7 @@ class _InboxScreenState extends State<InboxScreen> {
       Permission.phone,
       Permission.contacts,
       Permission.notification,
-      Permission.locationWhenInUse,
+      Permission.location,
     ].request();
 
     // 2. Загрузка истории
