@@ -36,7 +36,7 @@ class NetworkScanner {
       final response = await http.get(url).timeout(const Duration(seconds: 2));
 
       if (response.statusCode == 200) {
-        if (response.body.contains("Android Host")) {
+        if (response.body.contains("alive")) {
           return "http://$host:8080";
         }
       }

@@ -5,6 +5,7 @@ call flutter build web --release --target lib/main_web.dart --base-href / --no-t
 echo [2/4] Cleaning old assets...
 if exist assets\web.zip del assets\web.zip
 if not exist assets mkdir assets
+if exist build\web\assets\assets\web.zip del build\web\assets\assets\web.zip
 
 echo [3/4] Zipping Web Client...
 :: Используем PowerShell для создания zip (встроено в Windows)

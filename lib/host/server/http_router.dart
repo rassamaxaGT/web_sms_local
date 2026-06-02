@@ -6,11 +6,15 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../data/native_sms_client.dart';
+import '../data/template_storage.dart';
+import '../data/contact_storage.dart';
 import '../../shared/shared_models.dart';
 import '../../shared/security_service.dart';
 
 class HttpRouter {
   final NativeSmsClient _smsClient;
+  final TemplateStorage _templateStorage;
+  final ContactStorage _contactStorage = ContactStorage();
   SecurityService _security;
   final String _webRootPath;
   final List<WebSocketChannel> _sockets = [];
@@ -21,9 +25,25 @@ class HttpRouter {
   bool _isSecured = false;
   String? _currentSessionId;
 
-  HttpRouter(this._smsClient, this._security, this._webRootPath) {
-    _smsClient.onSmsReceived.listen(broadcast);
+  DateTime _lastActivity = DateTime.now();
+  void Function()? onIdle;
+
+  HttpRouter(this._smsClient, this._templateStorage, this._security, this._webRootPath, {this.onIdle}) {
+    _smsClient.onSmsReceived.listen((msg) {
+      _lastActivity = DateTime.now();
+      broadcast(msg);
+    });
+    
+    // Периодическая проверка простоя (например, каждые 5 минут)
+    Timer.periodic(const Duration(minutes: 5), (timer) {
+      if (_sockets.isEmpty && 
+          DateTime.now().difference(_lastActivity) > const Duration(minutes: 30)) {
+        onIdle?.call();
+      }
+    });
   }
+
+  void _trackActivity() => _lastActivity = DateTime.now();
 
   // Сканируем файлы один раз при старте
   Future<void> initialize() async {
@@ -81,27 +101,102 @@ class HttpRouter {
     // API Routes
     router.get(
       '/api/ping',
-      (Request req) => Response.ok(
-        jsonEncode({
-          'status': 'alive',
-          'secured': _isSecured,
-          'session_id': _currentSessionId,
-        }),
-        headers: {'Content-Type': 'application/json'},
-      ),
+      (Request req) {
+        _trackActivity();
+        return Response.ok(
+          jsonEncode({
+            'status': 'alive',
+            'secured': _isSecured,
+            'session_id': _currentSessionId,
+          }),
+          headers: {'Content-Type': 'application/json'},
+        );
+      },
     );
 
     router.get('/api/sims', (Request req) async {
+      _trackActivity();
       final sims = await _smsClient.getSimCards();
       return _encryptedRes(sims.map((e) => e.toJson()).toList());
     });
 
     router.get('/api/messages', (Request req) async {
-      final msgs = await _smsClient.getFullHistory();
+      _trackActivity();
+      final params = req.url.queryParameters;
+      final limit = int.tryParse(params['limit'] ?? '') ?? 50;
+      final offset = int.tryParse(params['offset'] ?? '') ?? 0;
+      final address = params['address'];
+
+      final msgs = await _smsClient.getMessages(
+        limit: limit,
+        offset: offset,
+        address: address,
+      );
       return _encryptedRes(msgs.map((e) => e.toJson()).toList());
     });
 
+    router.get('/api/threads', (Request req) async {
+      _trackActivity();
+      final params = req.url.queryParameters;
+      final limit = int.tryParse(params['limit'] ?? '') ?? 50;
+      final threads = await _smsClient.getThreads(limit: limit);
+      return _encryptedRes(threads.map((e) => e.toJson()).toList());
+    });
+
+    // === Templates API ===
+    router.get('/api/templates', (Request req) async {
+      _trackActivity();
+      final templates = await _templateStorage.loadTemplates();
+      return _encryptedRes(templates.map((e) => e.toJson()).toList());
+    });
+
+    router.post('/api/templates', (Request req) async {
+      _trackActivity();
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+      final template = SmsTemplateDto.fromJson(data);
+      await _templateStorage.addOrUpdateTemplate(template);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.delete('/api/templates', (Request req) async {
+      _trackActivity();
+      final params = req.url.queryParameters;
+      final id = params['id'];
+      if (id != null) {
+        await _templateStorage.deleteTemplate(id);
+      }
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    // === Contacts API ===
+    router.get('/api/contacts', (Request req) async {
+      _trackActivity();
+      final contacts = await _contactStorage.loadContacts();
+      return _encryptedRes(contacts.map((e) => e.toJson()).toList());
+    });
+
+    router.post('/api/contacts', (Request req) async {
+      _trackActivity();
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+      final contact = ContactDto.fromJson(data);
+      await _contactStorage.addOrUpdateContact(contact);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.delete('/api/contacts', (Request req) async {
+      _trackActivity();
+      final params = req.url.queryParameters;
+      final phone = params['phone'];
+      if (phone != null) {
+        await _contactStorage.deleteContact(phone);
+      }
+      return _encryptedRes({'status': 'ok'});
+    });
+
     router.post('/api/send', (Request req) async {
+      _trackActivity();
       final payload = await req.readAsString();
       final data = _security.decrypt(payload);
 
@@ -128,9 +223,10 @@ class HttpRouter {
     });
 
     router.get('/ws', (Request req) {
+      _trackActivity();
       return webSocketHandler((WebSocketChannel ws, _) {
         _sockets.add(ws);
-        ws.stream.listen((_) {}, onDone: () => _sockets.remove(ws));
+        ws.stream.listen((_) => _trackActivity(), onDone: () => _sockets.remove(ws));
       })(req);
     });
 
@@ -144,45 +240,61 @@ class HttpRouter {
   }
 
   Future<Response> _handleStatic(Request req) async {
+    _trackActivity();
     String path = req.url.path;
     if (path.startsWith('/')) path = path.substring(1);
     path = Uri.decodeComponent(path);
     if (path.isEmpty) path = 'index.html';
 
-    // Ищем в индексе (сначала по полному пути, потом по имени файла)
+    // Ищем в индексе
     File? file = _fileIndex[path] ?? _fileIndex[path.split('/').last];
 
     if (file != null && await file.exists()) {
-      final bytes = await file.readAsBytes();
+      final length = await file.length();
       final name = file.path.toLowerCase();
-      String mime = 'text/plain';
+      
+      // Более расширенный MIME-маппинг
+      final mime = _getMimeType(name);
 
-      if (name.endsWith('.html')) {
-        mime = 'text/html; charset=utf-8';
-      } else if (name.endsWith('.js')) {
-        mime = 'application/javascript';
-      } else if (name.endsWith('.css')) {
-        mime = 'text/css';
-      } else if (name.endsWith('.json')) {
-        mime = 'application/json';
-      } else if (name.endsWith('.otf')) {
-        mime = 'font/otf';
-      } else if (name.endsWith('.ttf')) {
-        mime = 'font/ttf';
-      } else if (name.endsWith('.wasm')) {
-        mime = 'application/wasm';
-      }
-
-      return Response.ok(bytes, headers: {'Content-Type': mime});
+      return Response.ok(
+        file.openRead(),
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': length.toString(),
+          'Cache-Control': 'public, max-age=3600', // Кэшируем на час
+        },
+      );
     }
 
     // Если файл не найден, но есть index.html (для SPA)
     if (_fileIndex.containsKey('index.html')) {
-      final bytes = await _fileIndex['index.html']!.readAsBytes();
-      return Response.ok(bytes, headers: {'Content-Type': 'text/html'});
+      final indexFile = _fileIndex['index.html']!;
+      return Response.ok(
+        indexFile.openRead(),
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': (await indexFile.length()).toString(),
+        },
+      );
     }
 
     return Response.notFound('Not found');
+  }
+
+  String _getMimeType(String fileName) {
+    if (fileName.endsWith('.html')) return 'text/html; charset=utf-8';
+    if (fileName.endsWith('.js')) return 'application/javascript';
+    if (fileName.endsWith('.css')) return 'text/css';
+    if (fileName.endsWith('.json')) return 'application/json';
+    if (fileName.endsWith('.png')) return 'image/png';
+    if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) return 'image/jpeg';
+    if (fileName.endsWith('.svg')) return 'image/svg+xml';
+    if (fileName.endsWith('.wasm')) return 'application/wasm';
+    if (fileName.endsWith('.ttf')) return 'font/ttf';
+    if (fileName.endsWith('.otf')) return 'font/otf';
+    if (fileName.endsWith('.woff')) return 'font/woff';
+    if (fileName.endsWith('.woff2')) return 'font/woff2';
+    return 'application/octet-stream';
   }
 
   Response _encryptedRes(dynamic data) => Response.ok(

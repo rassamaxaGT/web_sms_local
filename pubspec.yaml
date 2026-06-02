@@ -32,6 +32,10 @@ dependencies:
     sdk: flutter
   flutter_riverpod: ^3.2.0   # Для Web UI
   
+  # Локальный нативный плагин для работы с SMS и SIM
+  sms_host_native:
+    path: ./sms_host_native
+  
   # === Android / Host зависимости ===
   permission_handler: ^12.0.1
   flutter_background_service: ^5.0.0

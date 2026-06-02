@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import '../../shared/shared_models.dart';
 
 class NativeSmsClient {
@@ -40,7 +41,7 @@ class NativeSmsClient {
         );
       }).toList();
     } catch (e) {
-      print("Error fetching SIMs: $e");
+      debugPrint("Error fetching SIMs: $e");
       return [];
     }
   }
@@ -53,15 +54,16 @@ class NativeSmsClient {
         'subId': subId, // Убедитесь, что subId передается как int
       });
     } catch (e) {
-      print("Native send error: $e");
+      debugPrint("Native send error: $e");
       rethrow;
     }
   }
 
-  Future<List<SmsMessageDto>> getFullHistory() async {
+  Future<List<SmsMessageDto>> getMessages({int limit = 50, int offset = 0, String? address}) async {
     try {
       final List<dynamic>? result = await _methodChannel.invokeMethod(
-        'getAllMessages',
+        'getMessages',
+        {'limit': limit, 'offset': offset, 'address': address},
       );
       if (result == null) return [];
 
@@ -84,7 +86,33 @@ class NativeSmsClient {
         );
       }).toList();
     } catch (e) {
-      print("History fetch error: $e");
+      debugPrint("History fetch error: $e");
+      return [];
+    }
+  }
+
+  Future<List<SmsMessageDto>> getThreads({int limit = 50}) async {
+    try {
+      final List<dynamic>? result = await _methodChannel.invokeMethod(
+        'getThreads',
+        {'limit': limit},
+      );
+      if (result == null) return [];
+
+      return result.map((data) {
+        final map = Map<String, dynamic>.from(data as Map);
+        return SmsMessageDto(
+          id: map['id'] as int?,
+          threadId: map['threadId'] as int?,
+          address: map['address']?.toString() ?? 'Unknown',
+          body: map['body']?.toString() ?? '',
+          date: (map['date'] is int) ? map['date'] : DateTime.now().millisecondsSinceEpoch,
+          isSent: map['isSent'] == true,
+          subId: map['subId'] as int?,
+        );
+      }).toList();
+    } catch (e) {
+      debugPrint("Threads fetch error: $e");
       return [];
     }
   }

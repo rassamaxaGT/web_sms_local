@@ -3,20 +3,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../logic/providers.dart';
 import '../widgets/chat_sidebar.dart';
 import '../widgets/chat_window.dart';
-import 'login_screen.dart'; // Импорт для возврата
+import '../../../shared/theme.dart';
+import 'login_screen.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 1. Следим за синхронизацией
+    // 1. Sleek WebSocket/HTTP data synchronizer trigger
     ref.watch(syncProvider);
 
-    // 2. СЛУШАЕМ ПОТЕРЮ СОЕДИНЕНИЯ
+    // 2. Local disconnection auto-recovery
     ref.listen<bool>(isConnectedProvider, (previous, connected) {
       if (previous == true && connected == false) {
-        // Если мы были подключены и связь пропала
         _handleDisconnect(context, ref);
       }
     });
@@ -24,17 +24,20 @@ class HomeScreen extends ConsumerWidget {
     final selectedChat = ref.watch(selectedChatIdProvider);
 
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      backgroundColor: AppColors.background,
       body: Row(
         children: [
+          // Left Sidebar Container
           Container(
             width: 350,
             decoration: const BoxDecoration(
-              color: Colors.white,
-              border: Border(right: BorderSide(color: Colors.black12)),
+              color: AppColors.background,
+              border: Border(right: BorderSide(color: AppColors.border, width: 1)),
             ),
             child: const ChatSidebar(),
           ),
+          
+          // Right Main Chat Panel
           Expanded(
             child: selectedChat == null
                 ? const EmptyChatState()
@@ -46,20 +49,17 @@ class HomeScreen extends ConsumerWidget {
   }
 
   void _handleDisconnect(BuildContext context, WidgetRef ref) {
-    // Останавливаем все процессы
     ref.read(serverUrlProvider.notifier).set(null);
     ref.read(passwordProvider.notifier).set(null);
 
-    // Показываем сообщение
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text("Связь потеряна. Сервер недоступен."),
-        backgroundColor: Colors.red,
+        content: Text("Связь потеряна. Сервер недоступен.", style: TextStyle(color: Colors.white)),
+        backgroundColor: AppColors.error,
         duration: Duration(seconds: 5),
       ),
     );
 
-    // Вылетаем на главный экран
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (context) => const LoginScreen()),
       (route) => false,
@@ -67,34 +67,63 @@ class HomeScreen extends ConsumerWidget {
   }
 }
 
-// Виджет-заглушка: показывается, когда ни один чат не выбран
+// Beautiful Empty state shown when no chat is active
 class EmptyChatState extends StatelessWidget {
   const EmptyChatState({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+    return Container(
+      color: AppColors.background,
+      child: Stack(
         children: [
-          Icon(
-            Icons.chat_bubble_outline,
-            size: 100,
-            color: Colors.grey.withValues(alpha:  0.3),
+          // Elegant dot pattern backdrop
+          const Positioned.fill(
+            child: CustomPaint(painter: DotPatternPainter()),
           ),
-          const SizedBox(height: 20),
-          Text(
-            "Выберите чат, чтобы начать общение",
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w500,
-              color: Colors.grey[400],
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(28),
+                    decoration: BoxDecoration(
+                      color: AppColors.msgSent.withValues(alpha: 0.4),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: AppColors.border, width: 1),
+                    ),
+                    child: Icon(
+                      Icons.chat_bubble_outline_rounded,
+                      size: 64,
+                      color: AppColors.textSecondary.withValues(alpha: 0.5),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  const Text(
+                    "Выберите чат для начала общения",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                      fontFamily: 'Outfit',
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    "Все ваши SMS-переписки защищены сквозным локальным шифрованием.",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 13, 
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            "Все ваши переписки защищены сквозным шифрованием",
-            style: TextStyle(fontSize: 14, color: Colors.grey[400]),
           ),
         ],
       ),

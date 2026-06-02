@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:android_host/shared/shared_models.dart';
+import '../../../shared/theme.dart';
 
 class MessageBubble extends StatelessWidget {
   final SmsMessageDto message;
@@ -18,37 +19,45 @@ class MessageBubble extends StatelessWidget {
         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
         child: Container(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.6,
+            maxWidth: MediaQuery.of(context).size.width * 0.65,
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
           decoration: BoxDecoration(
-            color: isMe ? Colors.indigo : Colors.white,
+            color: isMe ? AppColors.msgSent : AppColors.msgReceived,
             borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(18),
-              topRight: const Radius.circular(18),
-              bottomLeft: Radius.circular(isMe ? 18 : 4),
-              bottomRight: Radius.circular(isMe ? 4 : 18),
+              topLeft: const Radius.circular(16),
+              topRight: const Radius.circular(16),
+              bottomLeft: Radius.circular(isMe ? 16 : 4),
+              bottomRight: Radius.circular(isMe ? 4 : 16),
             ),
-            boxShadow: const [
+            border: Border.all(
+              color: isMe 
+                  ? AppColors.accent.withValues(alpha: 0.25) 
+                  : AppColors.border,
+              width: 1,
+            ),
+            boxShadow: [
               BoxShadow(
-                color: Colors.black12,
-                blurRadius: 4,
-                offset: Offset(0, 2),
+                color: Colors.black.withValues(alpha: 0.12),
+                blurRadius: 6,
+                offset: const Offset(0, 3),
               ),
             ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Linkify(
                 text: message.body,
                 onOpen: (link) => launchUrl(Uri.parse(link.url)),
-                style: TextStyle(
-                  color: isMe ? Colors.white : Colors.black87,
-                  fontSize: 15,
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14.5,
+                  height: 1.35,
                 ),
-                linkStyle: TextStyle(
-                  color: isMe ? Colors.cyanAccent : Colors.indigo,
+                linkStyle: const TextStyle(
+                  color: AppColors.accentLight,
                   decoration: TextDecoration.underline,
                 ),
               ),
@@ -57,21 +66,31 @@ class MessageBubble extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (simName != null) ...[
-                    Text(
-                      simName!.toUpperCase(),
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                        color: isMe ? Colors.white70 : Colors.indigo.shade300,
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isMe 
+                            ? AppColors.accent.withValues(alpha: 0.2) 
+                            : AppColors.border,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        simName!.toUpperCase(),
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.5,
+                          color: isMe ? AppColors.textPrimary : AppColors.textSecondary,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),
                   ],
                   Text(
                     _formatTime(message.date),
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: isMe ? Colors.white60 : Colors.grey,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: AppColors.textSecondary,
                     ),
                   ),
                 ],

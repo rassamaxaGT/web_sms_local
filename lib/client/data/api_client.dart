@@ -39,8 +39,13 @@ class ApiClient {
     }
   }
 
-  Future<List<SmsMessageDto>> fetchMessages() async {
-    final res = await http.get(Uri.parse('$effectiveBaseUrl/api/messages'));
+  Future<List<SmsMessageDto>> fetchMessages({int limit = 50, int offset = 0, String? address}) async {
+    final uri = Uri.parse('$effectiveBaseUrl/api/messages').replace(queryParameters: {
+      'limit': limit.toString(),
+      'offset': offset.toString(),
+      'address': ?address,
+    });
+    final res = await http.get(uri);
 
     if (res.statusCode != 200) {
       throw Exception('Server Error: ${res.statusCode}');
@@ -52,6 +57,17 @@ class ApiClient {
     } catch (e) {
       rethrow;
     }
+  }
+
+  Future<List<SmsMessageDto>> fetchThreads({int limit = 50}) async {
+    final uri = Uri.parse('$effectiveBaseUrl/api/threads').replace(queryParameters: {
+      'limit': limit.toString(),
+    });
+    final res = await http.get(uri);
+    if (res.statusCode != 200) throw Exception('Failed to load threads');
+    
+    final List data = _security.decrypt(res.body);
+    return data.map((e) => SmsMessageDto.fromJson(e)).toList();
   }
 
   Future<void> sendSms(String phone, String body, int subId) async {
@@ -88,6 +104,56 @@ class ApiClient {
     if (res.statusCode != 200) {
       throw Exception("Failed to delete thread: ${res.body}");
     }
+  }
+
+  // === ТЕХНИЧЕСКАЯ РЕАЛИЗАЦИЯ ШАБЛОНОВ ===
+
+  Future<List<SmsTemplateDto>> fetchTemplates() async {
+    final res = await http.get(Uri.parse('$effectiveBaseUrl/api/templates'));
+    if (res.statusCode != 200) throw Exception('Failed to load templates');
+    
+    final List data = _security.decrypt(res.body);
+    return data.map((e) => SmsTemplateDto.fromJson(e)).toList();
+  }
+
+  Future<void> saveTemplate(SmsTemplateDto template) async {
+    final encrypted = _security.encrypt(template.toJson());
+    final res = await http.post(
+      Uri.parse('$effectiveBaseUrl/api/templates'),
+      body: encrypted,
+    );
+    if (res.statusCode != 200) throw Exception('Failed to save template');
+  }
+
+  Future<void> deleteTemplate(String id) async {
+    final uri = Uri.parse('$effectiveBaseUrl/api/templates').replace(queryParameters: {'id': id});
+    final res = await http.delete(uri);
+    if (res.statusCode != 200) throw Exception('Failed to delete template');
+  }
+
+  // === КНИГА КОНТАКТОВ ===
+
+  Future<List<ContactDto>> fetchContacts() async {
+    final res = await http.get(Uri.parse('$effectiveBaseUrl/api/contacts'));
+    if (res.statusCode != 200) throw Exception('Failed to load contacts');
+    
+    final List data = _security.decrypt(res.body);
+    return data.map((e) => ContactDto.fromJson(e)).toList();
+  }
+
+  Future<void> saveContact(ContactDto contact) async {
+    final encrypted = _security.encrypt(contact.toJson());
+    final res = await http.post(
+      Uri.parse('$effectiveBaseUrl/api/contacts'),
+      body: encrypted,
+    );
+    if (res.statusCode != 200) throw Exception('Failed to save contact');
+  }
+
+  Future<void> deleteContact(String phone) async {
+    final uri = Uri.parse('$effectiveBaseUrl/api/contacts').replace(queryParameters: {'phone': phone});
+    final res = await http.delete(uri);
+    if (res.statusCode != 200) throw Exception('Failed to delete contact');
   }
 
   // ======================

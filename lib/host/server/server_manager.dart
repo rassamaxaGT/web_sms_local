@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -6,12 +7,14 @@ import 'package:archive/archive.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:nsd/nsd.dart';
 import '../data/native_sms_client.dart';
+import '../data/template_storage.dart';
 import 'http_router.dart';
 import '../../shared/security_service.dart';
 
 class ServerManager {
   HttpServer? _server;
   final NativeSmsClient _smsClient = NativeSmsClient();
+  final TemplateStorage _templateStorage = TemplateStorage();
   HttpRouter? _router;
   Registration? _registration;
 
@@ -57,34 +60,35 @@ class ServerManager {
     try {
       staticPath = await _prepareWebAssets();
     } catch (e) {
-      print("Critical error unpacking assets: $e");
+      debugPrint("Critical error unpacking assets: $e");
       // Фолбек путь, чтобы сервер хоть как-то запустился (пусть и с ошибкой 404 для веба)
       final docDir = await getApplicationDocumentsDirectory();
       staticPath = docDir.path;
     }
 
     final security = SecurityService("waiting_for_qr");
-    _router = HttpRouter(_smsClient, security, staticPath);
+    _router = HttpRouter(_smsClient, _templateStorage, security, staticPath);
 
     await _router!.initialize();
 
+    // === IP Detection Improvement ===
     String ip = '0.0.0.0';
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
       );
-      for (var interface in interfaces) {
-        // Ищем приоритетно Wi-Fi интерфейс, если получится
-        bool isWlan = interface.name.toLowerCase().contains('wlan');
+      
+      // Сортируем интерфейсы, чтобы wlan был первым
+      interfaces.sort((a, b) => b.name.contains('wlan') ? 1 : -1);
 
+      for (var interface in interfaces) {
         for (var addr in interface.addresses) {
-          if (addr.address.startsWith('192.168.') ||
-              addr.address.startsWith('10.')) {
+          if (!addr.isLoopback && (addr.address.startsWith('192.168.') || addr.address.startsWith('10.'))) {
             ip = addr.address;
-            // Если нашли IP именно на wlan интерфейсе - это лучший кандидат
-            if (isWlan) break;
+            break;
           }
         }
+        if (ip != '0.0.0.0') break;
       }
     } catch (_) {}
 
@@ -92,11 +96,7 @@ class ServerManager {
     try {
       _server = await shelf_io.serve(_router!.handler, ip, 8080, shared: true);
     } catch (e) {
-      // Если порт занят, можно попробовать закрыть предыдущий инстанс и пересоздать
-      // или выбросить ошибку для UI
-      throw Exception(
-        "Не удалось запустить сервер на порту 8080. Возможно, он занят.",
-      );
+      throw Exception("Не удалось запустить сервер на порту 8080. Возможно, он занят.");
     }
 
     _currentUrl = 'http://$ip:${_server!.port}';
@@ -109,10 +109,14 @@ class ServerManager {
 
   Future<void> _registerMdnsService() async {
     try {
-      const String serviceName = 'sms-host';
+      // Генерируем уникальный суффикс для mDNS (например, из хеша IP или UUID)
+      final suffix = _currentUrl?.split('.').last ?? 'host';
+      final String serviceName = 'sms-host-$suffix';
+      
       _registration = await register(
-        const Service(name: serviceName, type: '_http._tcp', port: 8080),
+        Service(name: serviceName, type: '_http._tcp', port: 8080),
       );
+      stdout.writeln("mDNS registered as $serviceName.local");
     } catch (e) {
       stdout.writeln("mDNS registration error: $e");
     }
@@ -132,6 +136,9 @@ class ServerManager {
   Future<String> _prepareWebAssets() async {
     final docDir = await getApplicationDocumentsDirectory();
     final webDir = Directory('${docDir.path}/web_root');
+
+    // Мы всегда распаковываем ассеты, чтобы гарантировать актуальность веб-версии
+    // (особенно важно при разработке)
 
     if (await webDir.exists()) {
       await webDir.delete(recursive: true);

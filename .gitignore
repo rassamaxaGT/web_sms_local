@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Agent / Local Temp files
+.agent/
+lib/file_contents_log.txt
+
