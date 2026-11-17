@@ -1,55 +1,31 @@
-import 'dart:convert';
-import 'dart:io';
-import 'package:path_provider/path_provider.dart';
-import 'package:flutter/foundation.dart';
 import '../../shared/shared_models.dart';
+import 'json_file_storage.dart';
 
 class ContactStorage {
-  static const String _fileName = 'sms_contacts.json';
+  final JsonFileStorage<ContactDto> _storage = JsonFileStorage<ContactDto>(
+    fileName: 'sms_contacts.json',
+    fromJson: ContactDto.fromJson,
+    toJson: (item) => item.toJson(),
+  );
 
-  Future<File> _getFile() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/$_fileName');
+  Future<List<ContactDto>> loadContacts() => _storage.loadAllOrEmpty();
+
+  Future<void> saveContacts(List<ContactDto> contacts) => _storage.saveAll(contacts);
+
+  Future<void> addOrUpdateContact(ContactDto contact) {
+    return _storage.mutate((contacts) {
+      final index = contacts.indexWhere((e) => e.phone == contact.phone);
+      if (index != -1) {
+        contacts[index] = contact;
+      } else {
+        contacts.add(contact);
+      }
+    });
   }
 
-  Future<List<ContactDto>> loadContacts() async {
-    try {
-      final file = await _getFile();
-      if (!await file.exists()) return [];
-      
-      final content = await file.readAsString();
-      final List<dynamic> jsonList = jsonDecode(content);
-      return jsonList.map((e) => ContactDto.fromJson(e)).toList();
-    } catch (e) {
-      debugPrint("Error loading contacts: $e");
-      return [];
-    }
-  }
-
-  Future<void> saveContacts(List<ContactDto> contacts) async {
-    try {
-      final file = await _getFile();
-      final content = jsonEncode(contacts.map((e) => e.toJson()).toList());
-      await file.writeAsString(content);
-    } catch (e) {
-      debugPrint("Error saving contacts: $e");
-    }
-  }
-
-  Future<void> addOrUpdateContact(ContactDto contact) async {
-    final contacts = await loadContacts();
-    final index = contacts.indexWhere((e) => e.phone == contact.phone);
-    if (index != -1) {
-      contacts[index] = contact;
-    } else {
-      contacts.add(contact);
-    }
-    await saveContacts(contacts);
-  }
-
-  Future<void> deleteContact(String phone) async {
-    final contacts = await loadContacts();
-    contacts.removeWhere((e) => e.phone == phone);
-    await saveContacts(contacts);
+  Future<void> deleteContact(String phone) {
+    return _storage.mutate((contacts) {
+      contacts.removeWhere((e) => e.phone == phone);
+    });
   }
 }

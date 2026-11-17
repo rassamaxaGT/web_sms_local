@@ -227,7 +227,6 @@ class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStat
                       : ListView.builder(
                           padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
                           itemCount: sortedAddresses.length,
-                          cacheExtent: 300,
                           addRepaintBoundaries: true,
                           itemBuilder: (ctx, i) {
                             final address = sortedAddresses[i];
@@ -357,12 +356,12 @@ class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStat
                                             ),
                                             child: Center(
                                               child: Text(
-                                                address.isNotEmpty
-                                                    ? address
-                                                          .replaceAll('+', '')
-                                                          .substring(0, 1)
-                                                          .toUpperCase()
-                                                    : "?",
+                                                () {
+                                                  final cleaned = address.replaceAll('+', '').trim();
+                                                  return cleaned.isNotEmpty
+                                                      ? cleaned.substring(0, 1).toUpperCase()
+                                                      : "?";
+                                                }(),
                                                 style: const TextStyle(
                                                   color: Colors.white,
                                                   fontSize: 16,

@@ -15,7 +15,7 @@ class HttpRouter {
   final NativeSmsClient _smsClient;
   final TemplateStorage _templateStorage;
   final ContactStorage _contactStorage = ContactStorage();
-  SecurityService _security;
+  SecurityService? _security;
   final String _webRootPath;
   final List<WebSocketChannel> _sockets = [];
 
@@ -27,20 +27,35 @@ class HttpRouter {
 
   DateTime _lastActivity = DateTime.now();
   void Function()? onIdle;
+  StreamSubscription<SmsMessageDto>? _smsSubscription;
+  Timer? _idleTimer;
 
   HttpRouter(this._smsClient, this._templateStorage, this._security, this._webRootPath, {this.onIdle}) {
-    _smsClient.onSmsReceived.listen((msg) {
+    _smsSubscription = _smsClient.onSmsReceived.listen((msg) {
       _lastActivity = DateTime.now();
       broadcast(msg);
     });
     
     // Периодическая проверка простоя (например, каждые 5 минут)
-    Timer.periodic(const Duration(minutes: 5), (timer) {
+    _idleTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
       if (_sockets.isEmpty && 
           DateTime.now().difference(_lastActivity) > const Duration(minutes: 30)) {
         onIdle?.call();
       }
     });
+  }
+
+  Future<void> dispose() async {
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    await _smsSubscription?.cancel();
+    _smsSubscription = null;
+    for (final ws in List<WebSocketChannel>.from(_sockets)) {
+      try {
+        await ws.sink.close();
+      } catch (_) {}
+    }
+    _sockets.clear();
   }
 
   void _trackActivity() => _lastActivity = DateTime.now();
@@ -79,9 +94,9 @@ class HttpRouter {
   }
 
   void broadcast(SmsMessageDto msg) {
-    if (_sockets.isEmpty) return;
+    if (!_isSecured || _security == null || _sockets.isEmpty) return;
     try {
-      final encrypted = _security.encrypt({
+      final encrypted = _security!.encrypt({
         'type': 'NEW_SMS',
         'data': msg.toJson(),
       });
@@ -94,6 +109,26 @@ class HttpRouter {
       stdout.writeln("Broadcast error: $e");
     }
   }
+
+  bool _isAuthorized(Request req, {bool allowQueryToken = false}) {
+    if (!_isSecured || _security == null) return false;
+    final authHeader = req.headers['authorization'];
+    if (authHeader != null && authHeader.startsWith('Bearer ')) {
+      final token = authHeader.substring(7).trim();
+      if (_security!.verifyAuthToken(token)) return true;
+    }
+    if (allowQueryToken) {
+      final queryToken = req.url.queryParameters['token'];
+      if (_security!.verifyAuthToken(queryToken)) return true;
+    }
+    return false;
+  }
+
+  Response _unauthorizedResponse() => Response(
+    401,
+    body: jsonEncode({'error': 'Unauthorized'}),
+    headers: {'Content-Type': 'application/json'},
+  );
 
   Handler get handler {
     final router = Router();
@@ -115,12 +150,14 @@ class HttpRouter {
     );
 
     router.get('/api/sims', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final sims = await _smsClient.getSimCards();
       return _encryptedRes(sims.map((e) => e.toJson()).toList());
     });
 
     router.get('/api/messages', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final params = req.url.queryParameters;
       final limit = int.tryParse(params['limit'] ?? '') ?? 50;
@@ -136,6 +173,7 @@ class HttpRouter {
     });
 
     router.get('/api/threads', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final params = req.url.queryParameters;
       final limit = int.tryParse(params['limit'] ?? '') ?? 50;
@@ -145,21 +183,31 @@ class HttpRouter {
 
     // === Templates API ===
     router.get('/api/templates', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final templates = await _templateStorage.loadTemplates();
       return _encryptedRes(templates.map((e) => e.toJson()).toList());
     });
 
     router.post('/api/templates', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
-      final payload = await req.readAsString();
-      final data = _security.decrypt(payload);
-      final template = SmsTemplateDto.fromJson(data);
-      await _templateStorage.addOrUpdateTemplate(template);
-      return _encryptedRes({'status': 'ok'});
+      try {
+        final payload = await req.readAsString();
+        final data = _security!.decrypt(payload);
+        if (data is! Map<String, dynamic>) {
+          return Response(400, body: 'Invalid template payload');
+        }
+        final template = SmsTemplateDto.fromJson(data);
+        await _templateStorage.addOrUpdateTemplate(template);
+        return _encryptedRes({'status': 'ok'});
+      } catch (e) {
+        return Response(400, body: 'Failed to save template: $e');
+      }
     });
 
     router.delete('/api/templates', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final params = req.url.queryParameters;
       final id = params['id'];
@@ -171,21 +219,31 @@ class HttpRouter {
 
     // === Contacts API ===
     router.get('/api/contacts', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final contacts = await _contactStorage.loadContacts();
       return _encryptedRes(contacts.map((e) => e.toJson()).toList());
     });
 
     router.post('/api/contacts', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
-      final payload = await req.readAsString();
-      final data = _security.decrypt(payload);
-      final contact = ContactDto.fromJson(data);
-      await _contactStorage.addOrUpdateContact(contact);
-      return _encryptedRes({'status': 'ok'});
+      try {
+        final payload = await req.readAsString();
+        final data = _security!.decrypt(payload);
+        if (data is! Map<String, dynamic>) {
+          return Response(400, body: 'Invalid contact payload');
+        }
+        final contact = ContactDto.fromJson(data);
+        await _contactStorage.addOrUpdateContact(contact);
+        return _encryptedRes({'status': 'ok'});
+      } catch (e) {
+        return Response(400, body: 'Failed to save contact: $e');
+      }
     });
 
     router.delete('/api/contacts', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
       final params = req.url.queryParameters;
       final phone = params['phone'];
@@ -196,37 +254,55 @@ class HttpRouter {
     });
 
     router.post('/api/send', (Request req) async {
+      if (!_isAuthorized(req)) return _unauthorizedResponse();
       _trackActivity();
-      final payload = await req.readAsString();
-      final data = _security.decrypt(payload);
+      try {
+        final payload = await req.readAsString();
+        final data = _security!.decrypt(payload);
+        if (data is! Map<String, dynamic>) {
+          return Response(400, body: 'Invalid send payload');
+        }
 
-      final address = data['address'];
-      final body = data['body'];
-      final subId = data['subId'] ?? 0;
+        final address = data['address'];
+        final body = data['body'];
+        final subId = (data['subId'] as num?)?.toInt() ?? 0;
+        if (address is! String || address.isEmpty || body is! String) {
+          return Response(400, body: 'Missing address or body');
+        }
 
-      // 1. Отправляем физическое SMS через нативный клиент
-      await _smsClient.sendSms(address, body, subId);
+        // 1. Отправляем физическое SMS через нативный клиент
+        await _smsClient.sendSms(address, body, subId);
 
-      // 2. Создаем объект сообщения для обновления UI в вебе
-      final newMsg = SmsMessageDto(
-        address: address,
-        body: body,
-        date: DateTime.now().millisecondsSinceEpoch,
-        isSent: true, // Это исходящее
-        subId: subId,
-      );
+        // 2. Создаем объект сообщения для обновления UI в вебе
+        final newMsg = SmsMessageDto(
+          address: address,
+          body: body,
+          date: DateTime.now().millisecondsSinceEpoch,
+          isSent: true, // Это исходящее
+          subId: subId,
+        );
 
-      // 3. Рассылаем через WebSocket всем подключенным клиентам
-      broadcast(newMsg);
+        // 3. Рассылаем через WebSocket всем подключенным клиентам
+        broadcast(newMsg);
 
-      return _encryptedRes({'status': 'ok'});
+        return _encryptedRes({'status': 'ok'});
+      } catch (e) {
+        return Response.internalServerError(body: 'Send failed: $e');
+      }
     });
 
     router.get('/ws', (Request req) {
+      if (!_isAuthorized(req, allowQueryToken: true)) {
+        return _unauthorizedResponse();
+      }
       _trackActivity();
       return webSocketHandler((WebSocketChannel ws, _) {
         _sockets.add(ws);
-        ws.stream.listen((_) => _trackActivity(), onDone: () => _sockets.remove(ws));
+        ws.stream.listen(
+          (_) => _trackActivity(),
+          onDone: () => _sockets.remove(ws),
+          onError: (_) => _sockets.remove(ws),
+        );
       })(req);
     });
 
@@ -243,7 +319,11 @@ class HttpRouter {
     _trackActivity();
     String path = req.url.path;
     if (path.startsWith('/')) path = path.substring(1);
-    path = Uri.decodeComponent(path);
+    try {
+      path = Uri.decodeComponent(path);
+    } catch (_) {
+      return Response(400, body: 'Invalid URL encoding');
+    }
     if (path.isEmpty) path = 'index.html';
 
     // Ищем в индексе
@@ -298,13 +378,13 @@ class HttpRouter {
   }
 
   Response _encryptedRes(dynamic data) => Response.ok(
-    _security.encrypt(data),
+    _security!.encrypt(data),
     headers: {'Content-Type': 'text/plain'},
   );
 
   static const _corsHeaders = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': '*',
     'Access-Control-Allow-Private-Network': 'true',
   };

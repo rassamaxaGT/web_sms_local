@@ -35,50 +35,32 @@ class _ServerControlPanelState extends State<ServerControlPanel> {
           
           if (_isRunning) {
             _status = isSecured ? "ЗАЩИЩЕНО И ПОДКЛЮЧЕНО" : "Трансляция активна";
-            _addLog("[NET] Сервер запущен на $_serverUrl");
+            _appendLog("[NET] Сервер запущен на $_serverUrl");
             if (isSecured) {
-              _addLog("[SEC] Установлено защищенное SSL сопряжение.");
+              _appendLog("[SEC] Установлено защищенное сопряжение.");
             }
           } else {
             _status = "Трансляция остановлена";
-            _addLog("[SYS] Сервер фоновой службы остановлен.");
+            _appendLog("[SYS] Сервер фоновой службы остановлен.");
           }
         });
       }
     });
 
     service.invoke('requestStatus');
-    _simulateSystemBoot();
+    _appendLog("[SYS] Инициализация ядра SMS Host...");
+  }
+
+  void _appendLog(String log) {
+    if (_consoleLogs.contains(log)) return;
+    if (_consoleLogs.length > 20) _consoleLogs.removeAt(0);
+    _consoleLogs.add(log);
   }
 
   void _addLog(String log) {
     if (_consoleLogs.contains(log)) return;
     setState(() {
-      if (_consoleLogs.length > 20) _consoleLogs.removeAt(0);
-      _consoleLogs.add(log);
-    });
-  }
-
-  void _simulateSystemBoot() {
-    _consoleLogs.clear();
-    _addLog("[SYS] Инициализация ядра SMS Host...");
-    _addLog("[SYS] Проверка разрешений радиомодуля... ОК");
-    _addLog("[SYS] Поиск SIM карт в слотах... ОК");
-    
-    _logSimulatorTimer?.cancel();
-    _logSimulatorTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      if (_isRunning) {
-        final r = DateTime.now().millisecond;
-        if (r % 3 == 0) {
-          _addLog("[SYS] Выполнен цикличный опрос буфера SIM-карты.");
-        } else if (r % 3 == 1) {
-          _addLog("[NET] Пинг веб-сокета... Стабилен (0ms)");
-        }
-      }
+      _appendLog(log);
     });
   }
 
@@ -315,7 +297,7 @@ class _ServerControlPanelState extends State<ServerControlPanel> {
                 fontSize: 11,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 1.0,
-                color: _status.contains("ЗАЩИЩЕНО") || _status.contains("активен")
+                color: _status.contains("ЗАЩИЩЕНО") || _status.contains("активна")
                     ? AppColors.success
                     : AppColors.textSecondary,
               ),

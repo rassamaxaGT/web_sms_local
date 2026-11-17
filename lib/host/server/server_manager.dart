@@ -9,7 +9,6 @@ import 'package:nsd/nsd.dart';
 import '../data/native_sms_client.dart';
 import '../data/template_storage.dart';
 import 'http_router.dart';
-import '../../shared/security_service.dart';
 
 class ServerManager {
   HttpServer? _server;
@@ -66,8 +65,7 @@ class ServerManager {
       staticPath = docDir.path;
     }
 
-    final security = SecurityService("waiting_for_qr");
-    _router = HttpRouter(_smsClient, _templateStorage, security, staticPath);
+    _router = HttpRouter(_smsClient, _templateStorage, null, staticPath);
 
     await _router!.initialize();
 
@@ -109,8 +107,8 @@ class ServerManager {
 
   Future<void> _registerMdnsService() async {
     try {
-      // Генерируем уникальный суффикс для mDNS (например, из хеша IP или UUID)
-      final suffix = _currentUrl?.split('.').last ?? 'host';
+      final host = Uri.tryParse(_currentUrl ?? '')?.host ?? '';
+      final suffix = host.isNotEmpty ? host.split('.').last : 'host';
       final String serviceName = 'sms-host-$suffix';
       
       _registration = await register(
@@ -137,23 +135,30 @@ class ServerManager {
     final docDir = await getApplicationDocumentsDirectory();
     final webDir = Directory('${docDir.path}/web_root');
 
-    // Мы всегда распаковываем ассеты, чтобы гарантировать актуальность веб-версии
-    // (особенно важно при разработке)
-
-    if (await webDir.exists()) {
-      await webDir.delete(recursive: true);
-    }
-    await webDir.create(recursive: true);
-
     try {
       final zipData = await rootBundle.load('assets/web.zip');
       final bytes = zipData.buffer.asUint8List();
       final archive = ZipDecoder().decodeBytes(bytes);
 
+      if (await webDir.exists()) {
+        await webDir.delete(recursive: true);
+      }
+      await webDir.create(recursive: true);
+      final rootCanonical = webDir.resolveSymbolicLinksSync();
+
       for (final file in archive) {
-        // Фикс путей Windows для Android
+        // Фикс путей Windows для Android и защита от Zip Slip
         final fixedName = file.name.replaceAll('\\', '/');
-        final fullPath = '${webDir.path}/$fixedName';
+        if (fixedName.startsWith('/') || fixedName.split('/').contains('..')) {
+          stdout.writeln("Blocked unsafe archive entry: ${file.name}");
+          continue;
+        }
+        final fullPath = Uri.directory(rootCanonical).resolve(fixedName).toFilePath();
+        if (!fullPath.startsWith('$rootCanonical${Platform.pathSeparator}') &&
+            fullPath != rootCanonical) {
+          stdout.writeln("Blocked path traversal entry: ${file.name}");
+          continue;
+        }
 
         if (file.isFile) {
           final outFile = File(fullPath);
@@ -166,6 +171,9 @@ class ServerManager {
       stdout.writeln("Assets unpacked successfully.");
     } catch (e) {
       stdout.writeln("Unzip error: $e");
+      if (!await webDir.exists()) {
+        await webDir.create(recursive: true);
+      }
     }
     return webDir.path;
   }
@@ -175,9 +183,11 @@ class ServerManager {
     _isSecured = true; // Запоминаем, что QR успешно отсканирован
   }
 
-  void stop() {
-    _unregisterMdns();
-    _server?.close();
+  Future<void> stop() async {
+    await _router?.dispose();
+    _router = null;
+    await _unregisterMdns();
+    await _server?.close(force: true);
     _server = null;
     _currentUrl = null;
     _wifiName = null;

@@ -51,6 +51,11 @@ class HomeScreen extends ConsumerWidget {
   void _handleDisconnect(BuildContext context, WidgetRef ref) {
     ref.read(serverUrlProvider.notifier).set(null);
     ref.read(passwordProvider.notifier).set(null);
+    ref.read(allMessagesProvider.notifier).set([]);
+    ref.read(simsProvider.notifier).set([]);
+    ref.read(selectedChatIdProvider.notifier).select(null);
+    ref.read(selectedSimProvider.notifier).set(null);
+    ref.read(searchQueryProvider.notifier).set("");
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(

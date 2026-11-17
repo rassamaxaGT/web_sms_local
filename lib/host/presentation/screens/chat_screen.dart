@@ -47,9 +47,10 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
 
   Future<void> _loadData() async {
     final sims = await _smsClient.getSimCards();
-    final allMsgs = await _smsClient.getMessages(limit: 500);
-    final chatMsgs = allMsgs.where((m) => m.address == widget.address).toList()
-      ..sort((a, b) => a.date.compareTo(b.date));
+    final chatMsgs = (await _smsClient.getMessages(
+      limit: 200,
+      address: widget.address,
+    ))..sort((a, b) => a.date.compareTo(b.date));
 
     if (mounted) {
       setState(() {
@@ -208,7 +209,6 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
                         controller: _scrollController,
                         padding: const EdgeInsets.all(16),
                         itemCount: _messages.length,
-                        cacheExtent: 400,
                         itemBuilder: (ctx, i) {
                           final msg = _messages[i];
                           final isMe = msg.isSent;

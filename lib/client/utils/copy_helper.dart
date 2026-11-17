@@ -1,2 +1,2 @@
 export 'copy_helper_stub.dart'
-    if (dart.library.html) 'copy_helper_web.dart';
+    if (dart.library.js_interop) 'copy_helper_web.dart';

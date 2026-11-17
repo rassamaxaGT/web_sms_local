@@ -8,8 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Telephony
 import android.telephony.SmsManager
-import android.telephony.SmsMessage
 import android.telephony.SubscriptionManager
 import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -18,10 +18,9 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import java.util.ArrayList
-import java.util.HashMap
-import java.util.HashSet
 import android.util.Log
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /** SmsHostNativePlugin */
 class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
@@ -34,6 +33,7 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
     private var smsReceiver: SmsReceiver? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val executor: ExecutorService = Executors.newCachedThreadPool()
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         context = flutterPluginBinding.applicationContext
@@ -44,6 +44,7 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
         eventChannel = EventChannel(flutterPluginBinding.binaryMessenger, EVENT_CHANNEL)
         eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                unregisterSmsReceiver()
                 smsReceiver = SmsReceiver(events)
                 val filter = IntentFilter("android.provider.Telephony.SMS_RECEIVED")
             
@@ -55,10 +56,7 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
             }
 
             override fun onCancel(arguments: Any?) {
-                if (smsReceiver != null) {
-                    context.unregisterReceiver(smsReceiver)
-                    smsReceiver = null
-                }
+                unregisterSmsReceiver()
             }
         })
     }
@@ -100,38 +98,41 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
+    private fun unregisterSmsReceiver() {
+        smsReceiver?.let {
+            try {
+                context.unregisterReceiver(it)
+            } catch (_: IllegalArgumentException) {
+                // Receiver already unregistered
+            } finally {
+                smsReceiver = null
+            }
+        }
+    }
+
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
-        if (smsReceiver != null) {
-            context.unregisterReceiver(smsReceiver)
-            smsReceiver = null
-        }
+        unregisterSmsReceiver()
+        executor.shutdown()
     }
 
     class SmsReceiver(private val events: EventChannel.EventSink?) : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == "android.provider.Telephony.SMS_RECEIVED") {
-                val bundle = intent.extras
-                if (bundle != null) {
-                    val pdus = bundle.get("pdus") as Array<*>?
-                    if (pdus != null) {
-                        for (i in pdus.indices) {
-                            val msg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                SmsMessage.createFromPdu(pdus[i] as ByteArray, bundle.getString("format"))
-                            } else {
-                                SmsMessage.createFromPdu(pdus[i] as ByteArray)
-                            }
-                            val subId = bundle.getInt("subscription", -1)
-                            val data = HashMap<String, Any?>()
-                            data["address"] = msg.originatingAddress
-                            data["body"] = msg.messageBody
-                            data["date"] = System.currentTimeMillis()
-                            data["subId"] = if (subId != -1) subId else null
-                            events?.success(data)
-                        }
-                    }
+            if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
+            try {
+                val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
+                val subId = intent.extras?.getInt("subscription", -1) ?: -1
+                for (msg in messages) {
+                    val data = HashMap<String, Any?>()
+                    data["address"] = msg.originatingAddress
+                    data["body"] = msg.messageBody
+                    data["date"] = System.currentTimeMillis()
+                    data["subId"] = if (subId != -1) subId else null
+                    events?.success(data)
                 }
+            } catch (e: Exception) {
+                Log.e("SMS_HOST_NATIVE", "Failed to parse incoming SMS", e)
             }
         }
     }
@@ -154,7 +155,7 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
     }
 
     private fun sendSms(address: String, body: String, subId: Int, result: Result) {
-        Thread {
+        executor.execute {
             try {
                 val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     context.getSystemService(SmsManager::class.java).createForSubscriptionId(subId)
@@ -172,11 +173,11 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
             } catch (e: Exception) {
                 mainHandler.post { result.error("SEND_FAILED", "Failed to send SMS", e.message) }
             }
-        }.start()
+        }
     }
 
     private fun getMessages(limit: Int, offset: Int, address: String?, result: Result) {
-        Thread {
+        executor.execute {
             try {
                 val messages = ArrayList<HashMap<String, Any?>>()
                 val uri = Uri.parse("content://sms")
@@ -191,9 +192,7 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
                 }
 
                 val sortOrder = "date DESC LIMIT $limit OFFSET $offset"
-                val cursor = context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)
-
-                if (cursor != null) {
+                context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
                     val idxId = cursor.getColumnIndex("_id")
                     val idxThreadId = cursor.getColumnIndex("thread_id")
                     val idxAddress = cursor.getColumnIndex("address")
@@ -214,37 +213,40 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
                         map["subId"] = if (sId != -1) sId else null
                         messages.add(map)
                     }
-                    cursor.close()
                 }
                 mainHandler.post { result.success(messages) }
             } catch (e: Exception) {
                 mainHandler.post { result.error("READ_ERROR", "Failed to read SMS", e.message) }
             }
-        }.start()
+        }
     }
 
     private fun deleteSms(id: Int, result: Result) {
-        try {
-            val uri = Uri.parse("content://sms/$id")
-            val count = context.contentResolver.delete(uri, null, null)
-            if (count > 0) result.success(true) else result.success(false)
-        } catch (e: Exception) {
-            result.error("DELETE_ERROR", "Check if app is Default SMS App", e.message)
+        executor.execute {
+            try {
+                val uri = Uri.parse("content://sms/$id")
+                val count = context.contentResolver.delete(uri, null, null)
+                mainHandler.post { result.success(count > 0) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("DELETE_ERROR", "Check if app is Default SMS App", e.message) }
+            }
         }
     }
 
     private fun deleteThread(threadId: Int, result: Result) {
-        try {
-            val uri = Uri.parse("content://sms/conversations/$threadId")
-            val count = context.contentResolver.delete(uri, null, null)
-            if (count > 0) result.success(true) else result.success(false)
-        } catch (e: Exception) {
-            result.error("DELETE_ERROR", "Check if app is Default SMS App", e.message)
+        executor.execute {
+            try {
+                val uri = Uri.parse("content://sms/conversations/$threadId")
+                val count = context.contentResolver.delete(uri, null, null)
+                mainHandler.post { result.success(count > 0) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("DELETE_ERROR", "Check if app is Default SMS App", e.message) }
+            }
         }
     }
 
     private fun getThreads(limit: Int, result: Result) {
-        Thread {
+        executor.execute {
             try {
                 Log.d("SMS_HOST_NATIVE", "Fetching threads with limit $limit")
                 val threads = ArrayList<HashMap<String, Any?>>()
@@ -252,9 +254,7 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
                 val projection = arrayOf("_id", "thread_id", "address", "body", "date", "type", "sub_id")
                 val selection = "type = 1 OR type = 2" // Только входящие и исходящие
                 val sortOrder = "date DESC"
-                val cursor = context.contentResolver.query(uri, projection, selection, null, sortOrder)
-
-                if (cursor != null) {
+                context.contentResolver.query(uri, projection, selection, null, sortOrder)?.use { cursor ->
                     Log.d("SMS_HOST_NATIVE", "Cursor size: ${cursor.count}")
                     val idxId = cursor.getColumnIndex("_id")
                     val idxThreadId = cursor.getColumnIndex("thread_id")
@@ -282,7 +282,6 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
                             threads.add(map)
                         }
                     }
-                    cursor.close()
                     Log.d("SMS_HOST_NATIVE", "Found ${threads.size} unique threads")
                 }
                 mainHandler.post { result.success(threads) }
@@ -290,6 +289,6 @@ class SmsHostNativePlugin : FlutterPlugin, MethodCallHandler {
                 Log.e("SMS_HOST_NATIVE", "Threads error", e)
                 mainHandler.post { result.error("READ_ERROR", "Failed to read threads", e.message) }
             }
-        }.start()
+        }
     }
 }

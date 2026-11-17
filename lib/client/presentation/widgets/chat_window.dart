@@ -33,34 +33,36 @@ class HighlightingTextController extends TextEditingController {
       ..sort((a, b) => a.start.compareTo(b.start));
 
     for (var issue in sortedIssues) {
+      if (issue.start >= text.length) break;
+      final end = issue.end.clamp(0, text.length);
+      if (end <= start) continue;
+
+      final issueStart = issue.start < start ? start : issue.start;
       // Текст до ошибки
-      if (issue.start > start && issue.start <= text.length) {
-        spans.add(TextSpan(text: text.substring(start, issue.start)));
+      if (issueStart > start) {
+        spans.add(TextSpan(text: text.substring(start, issueStart)));
       }
 
       // Текст с ошибкой
-      if (issue.start < text.length) {
-        final end = issue.end.clamp(0, text.length);
-        if (end > issue.start) {
-          final isSpam = issue.isSpamTrigger;
-          spans.add(
-            TextSpan(
-              text: text.substring(issue.start, end),
-              style: TextStyle(
-                decoration: TextDecoration.underline,
-                decorationStyle: TextDecorationStyle.wavy,
-                decorationColor: isSpam
-                    ? Colors.deepOrangeAccent
-                    : AppColors.warning,
-                backgroundColor: isSpam
-                    ? const Color(0x33FF9800)
-                    : const Color(0x22818CF8), // Glowing amber vs indigo-violet
-              ),
+      if (end > issueStart) {
+        final isSpam = issue.isSpamTrigger;
+        spans.add(
+          TextSpan(
+            text: text.substring(issueStart, end),
+            style: TextStyle(
+              decoration: TextDecoration.underline,
+              decorationStyle: TextDecorationStyle.wavy,
+              decorationColor: isSpam
+                  ? Colors.deepOrangeAccent
+                  : AppColors.warning,
+              backgroundColor: isSpam
+                  ? const Color(0x33FF9800)
+                  : const Color(0x22818CF8), // Glowing amber vs indigo-violet
             ),
-          );
-        }
-        start = end;
+          ),
+        );
       }
+      start = end;
     }
     // Оставшийся текст
     if (start < text.length) {
@@ -81,6 +83,7 @@ class ChatWindow extends ConsumerStatefulWidget {
 class _ChatWindowState extends ConsumerState<ChatWindow> {
   final _controller = HighlightingTextController();
   final _scrollController = ScrollController();
+  ChatMessagesNotifier? _chatNotifier;
   String _currentValidationText = "";
   bool _isTemplateOpen = false;
   bool _isValidationExpanded = false;
@@ -95,7 +98,9 @@ class _ChatWindowState extends ConsumerState<ChatWindow> {
     _controller.addListener(_onControllerChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(chatMessagesProvider(widget.phone)).addListener(_onMessageAdded);
+      if (!mounted) return;
+      _chatNotifier = ref.read(chatMessagesProvider(widget.phone));
+      _chatNotifier?.addListener(_onMessageAdded);
     });
   }
 
@@ -110,10 +115,9 @@ class _ChatWindowState extends ConsumerState<ChatWindow> {
       ref.read(ignoredIssuesProvider.notifier).resetNow();
 
       // Update provider listeners
-      ref
-          .read(chatMessagesProvider(oldWidget.phone))
-          .removeListener(_onMessageAdded);
-      ref.read(chatMessagesProvider(widget.phone)).addListener(_onMessageAdded);
+      _chatNotifier?.removeListener(_onMessageAdded);
+      _chatNotifier = ref.read(chatMessagesProvider(widget.phone));
+      _chatNotifier?.addListener(_onMessageAdded);
 
       // Reload draft for new phone
       _controller.removeListener(_onControllerChanged);
@@ -127,9 +131,8 @@ class _ChatWindowState extends ConsumerState<ChatWindow> {
   void dispose() {
     _scrollController.removeListener(_onScroll);
     _controller.removeListener(_onControllerChanged);
-    ref
-        .read(chatMessagesProvider(widget.phone))
-        .removeListener(_onMessageAdded);
+    _chatNotifier?.removeListener(_onMessageAdded);
+    _chatNotifier = null;
     _scrollController.dispose();
     _controller.dispose();
     super.dispose();
@@ -209,17 +212,16 @@ class _ChatWindowState extends ConsumerState<ChatWindow> {
   void _send() async {
     final txt = _controller.text.trim();
     final selectedSimId = ref.read(selectedSimProvider);
-    if (txt.isEmpty || selectedSimId == null) return;
     final api = ref.read(apiClientProvider);
-    _controller.clear();
-    _controller.issues = [];
-    storage.setDraft(widget.phone, ""); // Clear draft on send
-
-    // Сбрасываем временные игнорирования после отправки
-    ref.read(ignoredIssuesProvider.notifier).resetNow();
+    if (txt.isEmpty || selectedSimId == null || api == null) return;
 
     try {
-      await api?.sendSms(widget.phone, txt, selectedSimId);
+      await api.sendSms(widget.phone, txt, selectedSimId);
+      if (!mounted) return;
+      _controller.clear();
+      _controller.issues = [];
+      storage.setDraft(widget.phone, "");
+      ref.read(ignoredIssuesProvider.notifier).resetNow();
       SfxService.playSent();
     } catch (e) {
       if (!mounted) return;
@@ -235,9 +237,11 @@ class _ChatWindowState extends ConsumerState<ChatWindow> {
     }
   }
 
-  bool _isSameDay(int ms1, int ms2) =>
-      DateTime.fromMillisecondsSinceEpoch(ms1).day ==
-      DateTime.fromMillisecondsSinceEpoch(ms2).day;
+  bool _isSameDay(int ms1, int ms2) {
+    final d1 = DateTime.fromMillisecondsSinceEpoch(ms1);
+    final d2 = DateTime.fromMillisecondsSinceEpoch(ms2);
+    return d1.year == d2.year && d1.month == d2.month && d1.day == d2.day;
+  }
 
   String _formatDateLabel(int ms) {
     final date = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -2043,10 +2047,28 @@ class _ChatWindowState extends ConsumerState<ChatWindow> {
       ),
     );
     if (confirm == true) {
-      await ref.read(apiClientProvider)?.deleteThread(threadId);
-      ref.read(selectedChatIdProvider.notifier).select(null);
-      ref.invalidate(syncProvider);
-      SfxService.playSent();
+      try {
+        await ref.read(apiClientProvider)?.deleteThread(threadId);
+        if (!mounted) return;
+        final remaining = ref
+            .read(allMessagesProvider)
+            .where((m) => m.threadId != threadId)
+            .toList();
+        ref.read(allMessagesProvider.notifier).set(remaining);
+        ref.read(selectedChatIdProvider.notifier).select(null);
+        SfxService.playSent();
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              "Ошибка удаления: $e",
+              style: const TextStyle(color: Colors.white),
+            ),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
     }
   }
 

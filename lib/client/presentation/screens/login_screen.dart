@@ -180,8 +180,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> with SingleTickerProv
               final ip = controller.text.trim();
               if (ip.isNotEmpty) {
                 var fullUrl = ip;
-                if (!fullUrl.startsWith('http')) fullUrl = "http://$fullUrl";
-                if (!fullUrl.contains(':8080')) fullUrl = "$fullUrl:8080";
+                if (!fullUrl.startsWith('http://') && !fullUrl.startsWith('https://')) {
+                  fullUrl = "http://$fullUrl";
+                }
+                final parsed = Uri.tryParse(fullUrl);
+                if (parsed != null && !parsed.hasPort) {
+                  fullUrl = "$fullUrl:8080";
+                }
                 _checkManualHost(fullUrl);
               }
             },
@@ -194,7 +199,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> with SingleTickerProv
           ),
         ],
       ),
-    );
+    ).then((_) => controller.dispose());
   }
 
   Future<void> _checkManualHost(String host) async {
@@ -205,13 +210,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> with SingleTickerProv
 
     try {
       final res = await http.get(Uri.parse('$host/api/ping')).timeout(const Duration(seconds: 3));
-      if (res.statusCode == 200 && mounted) {
+      if (!mounted) return;
+      if (res.statusCode == 200) {
         setState(() {
           _foundHost = host;
           _isScanning = false;
           _status = "Соединение установлено! Сканируйте QR.";
         });
         _startPollingForReadiness(host);
+      } else {
+        setState(() {
+          _isScanning = false;
+          _status = "Сервер вернул код ${res.statusCode}";
+        });
       }
     } catch (e) {
       if (mounted) {

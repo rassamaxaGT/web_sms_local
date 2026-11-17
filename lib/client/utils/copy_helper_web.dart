@@ -1,25 +1,25 @@
-// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use, avoid_print
-
+import 'dart:js_interop';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'dart:html' as html;
+import 'package:web/web.dart' as web;
 
-void copyToClipboard(String text) {
+Future<void> copyToClipboard(String text) async {
   // 1. Try standard Flutter clipboard first
-  Clipboard.setData(ClipboardData(text: text));
-
-  // 2. Perform robust Web-specific fallbacks (especially for WebView and HTTP)
   try {
-    if (html.window.navigator.clipboard != null) {
-      html.window.navigator.clipboard!.writeText(text);
-      return;
-    }
+    await Clipboard.setData(ClipboardData(text: text));
+  } catch (_) {}
+
+  // 2. Try Web Clipboard API
+  try {
+    await web.window.navigator.clipboard.writeText(text).toDart;
+    return;
   } catch (_) {
     // navigator.clipboard is disabled or blocked in non-secure (HTTP) contexts
   }
 
-  // 3. Ultimate Fallback: Temporary DOM textarea copy
+  // 3. Fallback: Temporary DOM textarea copy
   try {
-    final html.TextAreaElement textArea = html.TextAreaElement()
+    final textArea = web.HTMLTextAreaElement()
       ..value = text
       ..style.position = 'fixed'
       ..style.top = '0'
@@ -31,14 +31,14 @@ void copyToClipboard(String text) {
       ..style.outline = 'none'
       ..style.boxShadow = 'none'
       ..style.background = 'transparent';
-    
-    html.document.body?.append(textArea);
+
+    web.document.body?.append(textArea);
     textArea.focus();
     textArea.select();
-    
-    html.document.execCommand('copy');
+
+    web.document.execCommand('copy');
     textArea.remove();
   } catch (e) {
-    print("Fallback clipboard copy failed: $e");
+    debugPrint('Fallback clipboard copy failed: $e');
   }
 }

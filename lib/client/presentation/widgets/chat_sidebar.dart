@@ -558,7 +558,7 @@ class _ChatSidebarState extends ConsumerState<ChatSidebar> {
     final dt = DateTime.fromMillisecondsSinceEpoch(ms);
     final now = DateTime.now();
     if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {
-      return "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}";
+      return "${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
     }
     return "${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}";
   }

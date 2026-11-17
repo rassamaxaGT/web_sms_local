@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:audioplayers/audioplayers.dart';
 import '../../shared/shared_models.dart';
 import '../../shared/theme.dart';
 import '../data/api_client.dart';
@@ -59,6 +58,7 @@ class MessagesNotifier extends Notifier<List<SmsMessageDto>> {
   void set(List<SmsMessageDto> messages) => state = messages;
 
   void add(SmsMessageDto msg) {
+    if (msg.id != null && state.any((m) => m.id == msg.id)) return;
     state = [...state, msg];
   }
 }
@@ -131,11 +131,22 @@ class ChatMessagesNotifier extends ChangeNotifier {
   List<SmsMessageDto> _messages = [];
   bool _hasMore = true;
   bool _isLoading = false;
+  bool _isDisposed = false;
   int _offset = 0;
   static const int _limit = 30;
 
   ChatMessagesNotifier(this.ref, this.arg) {
-    loadMore();
+    Future.microtask(loadMore);
+  }
+
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
+
+  void _safeNotify() {
+    if (!_isDisposed) notifyListeners();
   }
 
   List<SmsMessageDto> get state => _messages;
@@ -143,14 +154,14 @@ class ChatMessagesNotifier extends ChangeNotifier {
   bool get isLoading => _isLoading;
 
   Future<void> loadMore() async {
-    if (_isLoading || !_hasMore) return;
+    if (_isLoading || !_hasMore || _isDisposed) return;
     _isLoading = true;
-    notifyListeners();
+    _safeNotify();
 
     final api = ref.read(apiClientProvider);
     if (api == null) {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify();
       return;
     }
 
@@ -165,24 +176,32 @@ class ChatMessagesNotifier extends ChangeNotifier {
         _hasMore = false;
       }
 
-      _messages = [...newMsgs.reversed, ..._messages];
+      final existingIds = _messages.map((m) => m.id).whereType<int>().toSet();
+      final uniqueNew = newMsgs.where((m) => m.id == null || !existingIds.contains(m.id));
+      _messages = [...uniqueNew.toList().reversed, ..._messages];
       _offset += newMsgs.length;
     } catch (e) {
       debugPrint("Error loading more messages: $e");
     } finally {
       _isLoading = false;
-      notifyListeners();
+      _safeNotify();
     }
   }
 
   void addMessage(SmsMessageDto msg) {
+    if (msg.id != null && _messages.any((m) => m.id == msg.id)) return;
     _messages = [..._messages, msg];
-    notifyListeners();
+    _offset += 1;
+    _safeNotify();
   }
 }
 
-final chatMessagesProvider = Provider.family<ChatMessagesNotifier, String>(
-  (ref, arg) => ChatMessagesNotifier(ref, arg),
+final chatMessagesProvider = Provider.autoDispose.family<ChatMessagesNotifier, String>(
+  (ref, arg) {
+    final notifier = ChatMessagesNotifier(ref, arg);
+    ref.onDispose(notifier.dispose);
+    return notifier;
+  },
 );
 
 // === 11. ШАБЛОНЫ (НОВОЕ) ===
@@ -277,7 +296,7 @@ class SmsBillingInfo {
   });
 }
 
-final smsBillingProvider = Provider.family<SmsBillingInfo, String>((ref, text) {
+final smsBillingProvider = Provider.autoDispose.family<SmsBillingInfo, String>((ref, text) {
   if (text.isEmpty) {
     return SmsBillingInfo(
       charCount: 0,
@@ -457,8 +476,19 @@ bool _isWordChar(String char) {
       char == 'Ё';
 }
 
+final _doubleSpaceRegex = RegExp(r' {2,}');
+final _sentenceStartRegex = RegExp(r'(^|[.!?]\s+)([a-zа-яё])');
+final _spaceBeforePunctuationRegex = RegExp(r'\s+([,.!?;:])');
+final Map<String, RegExp> _spamTriggerRegexes = {
+  for (final trigger in _spamTriggerWords.keys)
+    trigger: RegExp(
+      '(?:^|[^a-zA-Z0-9а-яА-ЯёЁ])($trigger[a-zA-Z0-9а-яА-ЯёЁ]*)(?:\$|[^a-zA-Z0-9а-яА-ЯёЁ])',
+      caseSensitive: false,
+    ),
+};
+
 // Пунктуация и регистр (мгновенно) с учетом правил игнорирования
-final textValidationProvider = Provider.family<List<ValidationIssue>, String>((
+final textValidationProvider = Provider.autoDispose.family<List<ValidationIssue>, String>((
   ref,
   text,
 ) {
@@ -466,8 +496,7 @@ final textValidationProvider = Provider.family<List<ValidationIssue>, String>((
   final issues = <ValidationIssue>[];
 
   // 1. Двойные пробелы
-  final doubleSpaceRegex = RegExp(r' {2,}');
-  for (var match in doubleSpaceRegex.allMatches(text)) {
+  for (var match in _doubleSpaceRegex.allMatches(text)) {
     issues.add(
       ValidationIssue(
         "Лишние пробелы",
@@ -479,8 +508,7 @@ final textValidationProvider = Provider.family<List<ValidationIssue>, String>((
   }
 
   // 2. Начало предложения с маленькой буквы
-  final sentenceStartRegex = RegExp(r'(^|[.!?]\s+)([a-zа-яё])');
-  for (var match in sentenceStartRegex.allMatches(text)) {
+  for (var match in _sentenceStartRegex.allMatches(text)) {
     final charIndex = match.end - 1;
     final char = text[charIndex];
     if (char == char.toLowerCase() && char != char.toUpperCase()) {
@@ -517,8 +545,7 @@ final textValidationProvider = Provider.family<List<ValidationIssue>, String>((
   }
 
   // 3. Пробел перед знаком препинания
-  final spaceBeforePunctuation = RegExp(r'\s+([,.!?;:])');
-  for (var match in spaceBeforePunctuation.allMatches(text)) {
+  for (var match in _spaceBeforePunctuationRegex.allMatches(text)) {
     issues.add(
       ValidationIssue(
         "Пробел перед знаком препинания",
@@ -531,10 +558,7 @@ final textValidationProvider = Provider.family<List<ValidationIssue>, String>((
 
   // 4. Поиск спам-триггеров
   _spamTriggerWords.forEach((trigger, hint) {
-    final regex = RegExp(
-      '(?:^|[^a-zA-Z0-9а-яА-ЯёЁ])($trigger[a-zA-Z0-9а-яА-ЯёЁ]*)(?:\$|[^a-zA-Z0-9а-яА-ЯёЁ])',
-      caseSensitive: false,
-    );
+    final regex = _spamTriggerRegexes[trigger]!;
     for (var match in regex.allMatches(text)) {
       final matchedWord = match.group(1);
       if (matchedWord != null) {
@@ -595,7 +619,9 @@ final apiClientProvider = Provider<ApiClient?>((ref) {
   final url = ref.watch(serverUrlProvider);
   final pass = ref.watch(passwordProvider);
   if (url != null && pass != null) {
-    return ApiClient(url, pass);
+    final client = ApiClient(url, pass);
+    ref.onDispose(client.dispose);
+    return client;
   }
   return null;
 });
@@ -654,26 +680,31 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
   final api = ref.watch(apiClientProvider);
   if (api == null) return;
 
-  final audioPlayer = AudioPlayer();
   StreamSubscription? wsSub;
+  var disposed = false;
 
   Future<void> connect() async {
     await wsSub?.cancel();
+    if (disposed) return;
     try {
       final sims = await api.fetchSims();
+      if (disposed) return;
       ref.read(simsProvider.notifier).set(sims);
 
       // Загружаем последние сообщения для формирования списка чатов
       final msgs = await api.fetchMessages(limit: 200);
+      if (disposed) return;
       ref.read(allMessagesProvider.notifier).set(msgs);
 
       // Загружаем контакты
       await ref.read(contactsProvider.notifier).load();
+      if (disposed) return;
 
       ref.read(isConnectedProvider.notifier).set(true);
 
       wsSub = api.connectWs().listen(
         (data) async {
+          if (disposed) return;
           if (data['type'] == 'NEW_SMS') {
             final msg = SmsMessageDto.fromJson(data['data']);
 
@@ -696,11 +727,15 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
             }
           }
         },
-        onDone: () => ref.read(isConnectedProvider.notifier).set(false),
-        onError: (_) => ref.read(isConnectedProvider.notifier).set(false),
+        onDone: () {
+          if (!disposed) ref.read(isConnectedProvider.notifier).set(false);
+        },
+        onError: (_) {
+          if (!disposed) ref.read(isConnectedProvider.notifier).set(false);
+        },
       );
     } catch (e) {
-      ref.read(isConnectedProvider.notifier).set(false);
+      if (!disposed) ref.read(isConnectedProvider.notifier).set(false);
     }
   }
 
@@ -708,22 +743,29 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
   await connect();
 
   // Reconnection & Health check timer
+  var isChecking = false;
   final healthTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+    if (disposed || isChecking) return;
+    isChecking = true;
     final isConnected = ref.read(isConnectedProvider);
     try {
       await api.fetchSims();
-      if (!isConnected) {
+      if (!disposed && !isConnected) {
         // Если восстановили связь по HTTP, пробуем переподключить WS
         await connect();
       }
     } catch (e) {
-      if (isConnected) ref.read(isConnectedProvider.notifier).set(false);
+      if (!disposed && isConnected) {
+        ref.read(isConnectedProvider.notifier).set(false);
+      }
+    } finally {
+      isChecking = false;
     }
   });
 
   ref.onDispose(() {
+    disposed = true;
     healthTimer.cancel();
     wsSub?.cancel();
-    audioPlayer.dispose();
   });
 });

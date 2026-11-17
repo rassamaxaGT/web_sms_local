@@ -55,7 +55,46 @@ void onStart(ServiceInstance service) async {
     });
   }
 
-  // 1. Автоматический запуск сервера при старте службы
+  final subscriptions = <StreamSubscription>[];
+
+  // Регистрируем обработчики ДО старта сервера, чтобы не терять события от UI во время распаковки
+  subscriptions.add(
+    service.on('requestStatus').listen((event) {
+      sendStatus();
+    }),
+  );
+
+  subscriptions.add(
+    service.on('updateSecurity').listen((event) {
+      if (event != null && event.containsKey('pass') && event.containsKey('id')) {
+        serverManager.updatePassword(
+          event['pass'].toString(),
+          event['id'].toString(),
+        );
+        if (service is AndroidServiceInstance) {
+          service.setForegroundNotificationInfo(
+            title: 'SMS Server Active (SECURED)',
+            content: 'Server is running at: ${serverManager.currentUrl}',
+          );
+        }
+        sendStatus();
+      }
+    }),
+  );
+
+  subscriptions.add(
+    service.on('stopService').listen((event) async {
+      for (final sub in subscriptions) {
+        await sub.cancel();
+      }
+      subscriptions.clear();
+      await serverManager.stop();
+      sendStatus();
+      await service.stopSelf();
+    }),
+  );
+
+  // Автоматический запуск сервера при старте службы
   try {
     final url = await serverManager.start();
     if (service is AndroidServiceInstance) {
@@ -74,33 +113,4 @@ void onStart(ServiceInstance service) async {
     }
     sendStatus();
   }
-
-  // 2. Обработчик запроса статуса из UI
-  service.on('requestStatus').listen((event) {
-    sendStatus();
-  });
-
-  // 3. Обработчик обновления пароля и сессии (после сканирования QR)
-  service.on('updateSecurity').listen((event) {
-    if (event != null && event.containsKey('pass') && event.containsKey('id')) {
-      serverManager.updatePassword(
-        event['pass'].toString(),
-        event['id'].toString(),
-      );
-      if (service is AndroidServiceInstance) {
-        service.setForegroundNotificationInfo(
-          title: 'SMS Server Active (SECURED)',
-          content: 'Server is running at: ${serverManager.currentUrl}',
-        );
-      }
-      sendStatus();
-    }
-  });
-
-  // 4. Обработчик остановки службы
-  service.on('stopService').listen((event) async {
-    serverManager.stop();
-    sendStatus();
-    await service.stopSelf();
-  });
 }
