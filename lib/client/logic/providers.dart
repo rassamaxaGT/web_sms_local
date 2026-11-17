@@ -5,6 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../shared/shared_models.dart';
 import '../../shared/theme.dart';
 import '../data/api_client.dart';
+import '../utils/recipient_importer.dart';
+
+ProviderContainer? globalContainer;
 
 // === 1. Server URL Notifier ===
 class ServerUrlNotifier extends Notifier<String?> {
@@ -50,15 +53,62 @@ final simsProvider = NotifierProvider<SimsNotifier, List<SimCardDto>>(
   SimsNotifier.new,
 );
 
+// === Helper: Reliable SMS Message Deduplication & Equality ===
+bool isSameSmsMessage(SmsMessageDto a, SmsMessageDto b) {
+  // 1. If both have database IDs, exact ID match is definitive
+  if (a.id != null && b.id != null) {
+    return a.id == b.id;
+  }
+
+  // 2. Direction must match (both outgoing or both incoming)
+  if (a.isSent != b.isSent) {
+    return false;
+  }
+
+  // 3. Normalized phone numbers must match
+  if (!RecipientImporter.isSamePhone(a.address, b.address)) {
+    return false;
+  }
+
+  // 4. Message text bodies must match
+  if (a.body.trim() != b.body.trim()) {
+    return false;
+  }
+
+  // 5. Timestamps within 25 seconds of each other (handles server/telephony clock delta)
+  final timeDiff = (a.date - b.date).abs();
+  return timeDiff <= 25000;
+}
+
 // === 5. Messages List Notifier ===
 class MessagesNotifier extends Notifier<List<SmsMessageDto>> {
   @override
   List<SmsMessageDto> build() => [];
 
-  void set(List<SmsMessageDto> messages) => state = messages;
+  void set(List<SmsMessageDto> messages) {
+    // Preserve any optimistic / real-time WebSocket messages not yet present in fetched batch
+    final merged = List<SmsMessageDto>.from(messages);
+    for (var existing in state) {
+      final exists = merged.any((m) => isSameSmsMessage(m, existing));
+      if (!exists) {
+        merged.add(existing);
+      }
+    }
+    merged.sort((a, b) => a.date.compareTo(b.date));
+    state = merged;
+  }
 
   void add(SmsMessageDto msg) {
-    if (msg.id != null && state.any((m) => m.id == msg.id)) return;
+    final index = state.indexWhere((m) => isSameSmsMessage(m, msg));
+    if (index != -1) {
+      final existing = state[index];
+      if (existing.id == null && msg.id != null) {
+        final updated = List<SmsMessageDto>.from(state);
+        updated[index] = msg;
+        state = updated;
+      }
+      return;
+    }
     state = [...state, msg];
   }
 }
@@ -72,7 +122,14 @@ final allMessagesProvider =
 class SelectedChatNotifier extends Notifier<String?> {
   @override
   String? build() => null;
-  void select(String? phone) => state = phone;
+  void select(String? phone) {
+    if (phone == null || phone.isEmpty) {
+      state = null;
+    } else {
+      final normalized = RecipientImporter.normalizePhone(phone);
+      state = normalized.isNotEmpty ? normalized : phone;
+    }
+  }
 }
 
 final selectedChatIdProvider = NotifierProvider<SelectedChatNotifier, String?>(
@@ -136,6 +193,13 @@ class ChatMessagesNotifier extends ChangeNotifier {
   static const int _limit = 30;
 
   ChatMessagesNotifier(this.ref, this.arg) {
+    final allKnown = ref.read(allMessagesProvider);
+    final initial = allKnown
+        .where((m) => RecipientImporter.isSamePhone(m.address, arg))
+        .toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+    _messages = initial;
+
     Future.microtask(loadMore);
   }
 
@@ -176,9 +240,19 @@ class ChatMessagesNotifier extends ChangeNotifier {
         _hasMore = false;
       }
 
-      final existingIds = _messages.map((m) => m.id).whereType<int>().toSet();
-      final uniqueNew = newMsgs.where((m) => m.id == null || !existingIds.contains(m.id));
-      _messages = [...uniqueNew.toList().reversed, ..._messages];
+      final updatedList = List<SmsMessageDto>.from(_messages);
+      for (var incoming in newMsgs) {
+        final idx = updatedList.indexWhere((m) => isSameSmsMessage(m, incoming));
+        if (idx != -1) {
+          if (updatedList[idx].id == null && incoming.id != null) {
+            updatedList[idx] = incoming;
+          }
+        } else {
+          updatedList.add(incoming);
+        }
+      }
+      updatedList.sort((a, b) => a.date.compareTo(b.date));
+      _messages = updatedList;
       _offset += newMsgs.length;
     } catch (e) {
       debugPrint("Error loading more messages: $e");
@@ -189,8 +263,19 @@ class ChatMessagesNotifier extends ChangeNotifier {
   }
 
   void addMessage(SmsMessageDto msg) {
-    if (msg.id != null && _messages.any((m) => m.id == msg.id)) return;
-    _messages = [..._messages, msg];
+    if (!RecipientImporter.isSamePhone(arg, msg.address)) return;
+
+    final index = _messages.indexWhere((m) => isSameSmsMessage(m, msg));
+    if (index != -1) {
+      final existing = _messages[index];
+      if (existing.id == null && msg.id != null) {
+        _messages[index] = msg;
+        _safeNotify();
+      }
+      return;
+    }
+    _messages.add(msg);
+    _messages.sort((a, b) => a.date.compareTo(b.date));
     _offset += 1;
     _safeNotify();
   }
@@ -242,6 +327,140 @@ final templatesProvider =
       TemplatesNotifier.new,
     );
 
+// === APP VIEW MODE ===
+enum AppViewMode { chats, broadcast, callLog }
+
+class ActiveViewNotifier extends Notifier<AppViewMode> {
+  @override
+  AppViewMode build() => AppViewMode.chats;
+  void set(AppViewMode mode) => state = mode;
+}
+
+final activeViewModeProvider = NotifierProvider<ActiveViewNotifier, AppViewMode>(
+  ActiveViewNotifier.new,
+);
+
+// === CAMPAIGNS NOTIFIER ===
+class CampaignsNotifier extends Notifier<List<CampaignDto>> {
+  @override
+  List<CampaignDto> build() => [];
+
+  void set(List<CampaignDto> list) => state = list;
+
+  Future<void> load() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    try {
+      state = await api.fetchCampaigns();
+    } catch (e) {
+      debugPrint("Error loading campaigns: $e");
+    }
+  }
+
+  void addOrUpdate(CampaignDto campaign) {
+    final index = state.indexWhere((c) => c.id == campaign.id);
+    if (index != -1) {
+      final updated = List<CampaignDto>.from(state);
+      updated[index] = campaign;
+      state = updated;
+    } else {
+      state = [campaign, ...state];
+    }
+  }
+
+  void updateItem(String campaignId, CampaignItemDto item) {
+    final cIndex = state.indexWhere((c) => c.id == campaignId);
+    if (cIndex == -1) return;
+
+    final campaign = state[cIndex];
+    final itemIndex = campaign.items.indexWhere((i) => i.id == item.id);
+    if (itemIndex == -1) return;
+
+    final newItems = List<CampaignItemDto>.from(campaign.items);
+    newItems[itemIndex] = item;
+
+    final updatedCampaign = campaign.copyWith(
+      items: newItems,
+      sentCount: newItems.where((i) => i.status == 'sent').length,
+      failedCount: newItems.where((i) => i.status == 'failed').length,
+      updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    final updated = List<CampaignDto>.from(state);
+    updated[cIndex] = updatedCampaign;
+    state = updated;
+  }
+
+  Future<void> create(CampaignDto campaign) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    await api.createCampaign(campaign);
+    await load();
+  }
+
+  Future<void> start(String id) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    await api.startCampaign(id);
+    await load();
+  }
+
+  Future<void> pause(String id) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    await api.pauseCampaign(id);
+    await load();
+  }
+
+  Future<void> stop(String id) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    await api.stopCampaign(id);
+    await load();
+  }
+
+  Future<void> retryFailed(String id) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    await api.retryFailedCampaign(id);
+    await load();
+  }
+
+  Future<void> delete(String id) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    await api.deleteCampaign(id);
+    state = state.where((c) => c.id != id).toList();
+  }
+}
+
+final campaignsProvider =
+    NotifierProvider<CampaignsNotifier, List<CampaignDto>>(
+      CampaignsNotifier.new,
+    );
+
+class SelectedCampaignNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void select(String? id) => state = id;
+}
+
+final selectedCampaignIdProvider =
+    NotifierProvider<SelectedCampaignNotifier, String?>(
+      SelectedCampaignNotifier.new,
+    );
+
+final activeCampaignProvider = Provider<CampaignDto?>((ref) {
+  final selectedId = ref.watch(selectedCampaignIdProvider);
+  final all = ref.watch(campaignsProvider);
+  if (selectedId == null) return all.firstOrNull;
+  try {
+    return all.firstWhere((c) => c.id == selectedId);
+  } catch (_) {
+    return all.firstOrNull;
+  }
+});
+
 // === 14. КОНТАКТЫ (НОВОЕ) ===
 class ContactsNotifier extends Notifier<List<ContactDto>> {
   @override
@@ -272,11 +491,338 @@ class ContactsNotifier extends Notifier<List<ContactDto>> {
     await api.deleteContact(phone);
     await load();
   }
+
+  Future<void> clearCallback(ContactDto contact) async {
+    final updated = ContactDto(
+      phone: contact.phone,
+      name: contact.name,
+      notes: contact.notes,
+      callbackTimeMs: null,
+      callHistory: contact.callHistory,
+    );
+    await save(updated);
+  }
+
+  Future<void> logMissedCallback(ContactDto contact) async {
+    final List<CallRecordDto> updatedHistory = List.from(contact.callHistory);
+    final callbackTime = contact.callbackTimeMs ?? DateTime.now().millisecondsSinceEpoch;
+
+    updatedHistory.add(CallRecordDto(
+      timestamp: callbackTime,
+      comment: "Пропущен запланированный перезвон",
+      status: "пропущен",
+    ));
+
+    final updated = ContactDto(
+      phone: contact.phone,
+      name: contact.name,
+      notes: contact.notes,
+      callbackTimeMs: null,
+      callHistory: updatedHistory,
+    );
+    await save(updated);
+  }
 }
 
 final contactsProvider =
     NotifierProvider<ContactsNotifier, List<ContactDto>>(
       ContactsNotifier.new,
+    );
+
+// === 11b. ACTIVE CALL STATE & NOTIFIER ===
+class ActiveCallState {
+  final bool isInCall;
+  final String? phoneNumber;
+  final String? contactName;
+  final int? startedAt;
+  final int durationSeconds;
+  final String callStatus; // 'OFFHOOK', 'RINGING', 'IDLE'
+  final bool isIncoming;
+
+  const ActiveCallState({
+    this.isInCall = false,
+    this.phoneNumber,
+    this.contactName,
+    this.startedAt,
+    this.durationSeconds = 0,
+    this.callStatus = 'IDLE',
+    this.isIncoming = false,
+  });
+
+  ActiveCallState copyWith({
+    bool? isInCall,
+    String? phoneNumber,
+    String? contactName,
+    int? startedAt,
+    int? durationSeconds,
+    String? callStatus,
+    bool? isIncoming,
+  }) {
+    return ActiveCallState(
+      isInCall: isInCall ?? this.isInCall,
+      phoneNumber: phoneNumber ?? this.phoneNumber,
+      contactName: contactName ?? this.contactName,
+      startedAt: startedAt ?? this.startedAt,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
+      callStatus: callStatus ?? this.callStatus,
+      isIncoming: isIncoming ?? this.isIncoming,
+    );
+  }
+}
+
+class ActiveCallNotifier extends Notifier<ActiveCallState> {
+  Timer? _ticker;
+
+  @override
+  ActiveCallState build() {
+    ref.onDispose(() {
+      _ticker?.cancel();
+    });
+    return const ActiveCallState();
+  }
+
+  void startCall(String phone, {String? contactName}) {
+    _ticker?.cancel();
+    String? resolvedName = contactName;
+    if (resolvedName == null || resolvedName.isEmpty) {
+      final contacts = ref.read(contactsProvider);
+      for (var c in contacts) {
+        if (RecipientImporter.isSamePhone(c.phone, phone)) {
+          resolvedName = c.name;
+          break;
+        }
+      }
+    }
+
+    state = ActiveCallState(
+      isInCall: true,
+      phoneNumber: phone,
+      contactName: resolvedName,
+      startedAt: DateTime.now().millisecondsSinceEpoch,
+      durationSeconds: 0,
+      callStatus: 'OFFHOOK',
+      isIncoming: false,
+    );
+    _ticker = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (state.isInCall && state.callStatus == 'OFFHOOK') {
+        state = state.copyWith(durationSeconds: state.durationSeconds + 1);
+      }
+    });
+  }
+
+  void handleEvent(Map<String, dynamic> data) {
+    final rawState = data['state']?.toString().toUpperCase() ?? '';
+    final phone = data['phoneNumber']?.toString() ?? '';
+
+    if (rawState == 'OFFHOOK') {
+      if (!state.isInCall) {
+        startCall(phone);
+      } else {
+        // If incoming call was answered, start the timer now
+        _ticker?.cancel();
+        _ticker = Timer.periodic(const Duration(seconds: 1), (timer) {
+          if (state.isInCall && state.callStatus == 'OFFHOOK') {
+            state = state.copyWith(durationSeconds: state.durationSeconds + 1);
+          }
+        });
+        state = state.copyWith(callStatus: 'OFFHOOK');
+      }
+    } else if (rawState == 'RINGING') {
+      String? resolvedName;
+      if (phone.isNotEmpty) {
+        final contacts = ref.read(contactsProvider);
+        for (var c in contacts) {
+          if (RecipientImporter.isSamePhone(c.phone, phone)) {
+            resolvedName = c.name;
+            break;
+          }
+        }
+      }
+      state = state.copyWith(
+        isInCall: true,
+        callStatus: 'RINGING',
+        isIncoming: true,
+        phoneNumber: phone.isNotEmpty ? phone : state.phoneNumber,
+        contactName: resolvedName ?? state.contactName,
+        startedAt: DateTime.now().millisecondsSinceEpoch,
+      );
+    } else if (rawState == 'IDLE') {
+      if (state.isInCall) {
+        _ticker?.cancel();
+        state = state.copyWith(
+          isInCall: false,
+          callStatus: 'IDLE',
+          isIncoming: false,
+        );
+
+        // Sync with Android's system call log once Android flushes the finished call
+        Future.delayed(const Duration(milliseconds: 1500), () {
+          ref.read(callLogsProvider.notifier).load();
+        });
+      }
+    }
+  }
+
+  Future<void> hangup() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    try {
+      await api.hangupCall();
+    } catch (e) {
+      debugPrint("hangupCall error: $e");
+    }
+  }
+
+}
+
+final activeCallProvider =
+    NotifierProvider<ActiveCallNotifier, ActiveCallState>(
+      ActiveCallNotifier.new,
+    );
+
+// === 11.2 CALL LOGS NOTIFIER ===
+class CallLogNotifier extends Notifier<List<CallLogEntryDto>> {
+  @override
+  List<CallLogEntryDto> build() => [];
+
+  void set(List<CallLogEntryDto> logs) {
+    state = logs;
+  }
+
+  Future<void> load() async {
+    final api = ref.read(apiClientProvider);
+    final contacts = ref.read(contactsProvider);
+
+    List<CallLogEntryDto> serverLogs = [];
+    if (api != null) {
+      try {
+        serverLogs = await api.fetchCallLogs(limit: 250);
+      } catch (e) {
+        debugPrint("fetchCallLogs error: $e");
+      }
+    }
+
+    // Direct synchronization with Android system call log.
+    // No independent accounting: take calls from Android and only enrich contact name
+    // if Android CallLog did not provide a name and the app has one.
+    final resolved = serverLogs.map((entry) {
+      if (entry.name == null || entry.name!.trim().isEmpty) {
+        for (var c in contacts) {
+          if (RecipientImporter.isSamePhone(c.phone, entry.number) && c.name.trim().isNotEmpty) {
+            return CallLogEntryDto(
+              id: entry.id,
+              number: entry.number,
+              name: c.name.trim(),
+              date: entry.date,
+              durationSeconds: entry.durationSeconds,
+              direction: entry.direction,
+              status: entry.status,
+              comment: entry.comment,
+            );
+          }
+        }
+      }
+      return entry;
+    }).toList();
+
+    resolved.sort((a, b) => b.date.compareTo(a.date));
+    state = resolved;
+  }
+}
+
+final callLogsProvider =
+    NotifierProvider<CallLogNotifier, List<CallLogEntryDto>>(
+      CallLogNotifier.new,
+    );
+
+// === 11.3 DEVICE VOLUME NOTIFIER ===
+class DeviceVolumeNotifier extends Notifier<DeviceVolumeDto> {
+  @override
+  DeviceVolumeDto build() => const DeviceVolumeDto();
+
+  Future<void> load() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    try {
+      final vol = await api.fetchDeviceVolume();
+      state = vol;
+    } catch (e) {
+      debugPrint("DeviceVolume load error: $e");
+    }
+  }
+
+  Future<void> ringVolumeUp() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    final next = (state.ringVolume + 1).clamp(0, state.maxRingVolume);
+    state = state.copyWith(ringVolume: next);
+    try {
+      final updated = await api.setDeviceVolume(stream: 'ring', direction: 'up');
+      state = updated;
+    } catch (e) {
+      debugPrint("ringVolumeUp error: $e");
+    }
+  }
+
+  Future<void> ringVolumeDown() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    final next = (state.ringVolume - 1).clamp(0, state.maxRingVolume);
+    state = state.copyWith(ringVolume: next);
+    try {
+      final updated = await api.setDeviceVolume(stream: 'ring', direction: 'down');
+      state = updated;
+    } catch (e) {
+      debugPrint("ringVolumeDown error: $e");
+    }
+  }
+
+  Future<void> setRingVolume(int volume) async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    state = state.copyWith(ringVolume: volume.clamp(0, state.maxRingVolume));
+    try {
+      final updated = await api.setDeviceVolume(stream: 'ring', volume: volume);
+      state = updated;
+    } catch (e) {
+      debugPrint("setRingVolume error: $e");
+    }
+  }
+
+  Future<void> callVolumeUp() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    final next = (state.callVolume + 1).clamp(0, state.maxCallVolume);
+    state = state.copyWith(callVolume: next);
+    try {
+      final updated = await api.setDeviceVolume(stream: 'call', direction: 'up');
+      state = updated;
+    } catch (e) {
+      debugPrint("callVolumeUp error: $e");
+    }
+  }
+
+  Future<void> callVolumeDown() async {
+    final api = ref.read(apiClientProvider);
+    if (api == null) return;
+    final next = (state.callVolume - 1).clamp(0, state.maxCallVolume);
+    state = state.copyWith(callVolume: next);
+    try {
+      final updated = await api.setDeviceVolume(stream: 'call', direction: 'down');
+      state = updated;
+    } catch (e) {
+      debugPrint("callVolumeDown error: $e");
+    }
+  }
+
+  void set(DeviceVolumeDto dto) {
+    state = dto;
+  }
+}
+
+final deviceVolumeProvider =
+    NotifierProvider<DeviceVolumeNotifier, DeviceVolumeDto>(
+      DeviceVolumeNotifier.new,
     );
 
 // === 12. SMS БИЛЛИНГ И СЕГМЕНТАЦИЯ ===
@@ -626,13 +1172,21 @@ final apiClientProvider = Provider<ApiClient?>((ref) {
   return null;
 });
 
-// Базовая группировка сообщений по чатам
+// Базовая группировка сообщений по чатам с нормализацией телефонов
 final threadsProvider = Provider<Map<String, List<SmsMessageDto>>>((ref) {
   final messages = ref.watch(allMessagesProvider);
   final grouped = <String, List<SmsMessageDto>>{};
   for (var msg in messages) {
-    if (!grouped.containsKey(msg.address)) grouped[msg.address] = [];
-    grouped[msg.address]!.add(msg);
+    final norm = RecipientImporter.normalizePhone(msg.address);
+    String threadKey = norm.isNotEmpty ? norm : msg.address;
+    for (var existingKey in grouped.keys) {
+      if (RecipientImporter.isSamePhone(existingKey, threadKey)) {
+        threadKey = existingKey;
+        break;
+      }
+    }
+    if (!grouped.containsKey(threadKey)) grouped[threadKey] = [];
+    grouped[threadKey]!.add(msg);
   }
   // Сортировка сообщений внутри чата по времени
   for (var k in grouped.keys) {
@@ -660,7 +1214,7 @@ final filteredThreadsProvider = Provider<Map<String, List<SmsMessageDto>>>((
     final messages = entry.value;
 
     final contact = contacts.firstWhere(
-      (c) => c.phone == phone,
+      (c) => RecipientImporter.isSamePhone(c.phone, phone),
       orElse: () => ContactDto(phone: phone, name: "", notes: ""),
     );
     bool matchName = contact.name.toLowerCase().contains(query);
@@ -672,6 +1226,147 @@ final filteredThreadsProvider = Provider<Map<String, List<SmsMessageDto>>>((
     }
   }
   return filtered;
+});
+
+// === UNIFIED CLIENTS (NEW) ===
+class SidebarClientItem {
+  final String phone;
+  final ContactDto? contact;
+  final SmsMessageDto? lastMessage;
+  final int unreadCount;
+
+  SidebarClientItem({
+    required this.phone,
+    this.contact,
+    this.lastMessage,
+    this.unreadCount = 0,
+  });
+}
+
+final sidebarClientsProvider = Provider<List<SidebarClientItem>>((ref) {
+  final contacts = ref.watch(contactsProvider);
+  final threads = ref.watch(threadsProvider);
+  final unreadCounts = ref.watch(unreadCountsProvider);
+
+  final allPhones = <String>{};
+  for (var c in contacts) {
+    if (c.phone.isNotEmpty) {
+      allPhones.add(c.phone);
+    }
+  }
+  allPhones.addAll(threads.keys);
+
+  final items = <SidebarClientItem>[];
+  final now = DateTime.now();
+  final todayStart = DateTime(now.year, now.month, now.day);
+  final todayEnd = DateTime(now.year, now.month, now.day, 23, 59, 59, 999);
+
+  bool isPendingCallback(ContactDto? c) {
+    if (c == null || c.callbackTimeMs == null) return false;
+    final cbTime = c.callbackTime!;
+    return cbTime.isBefore(now) || (cbTime.isAfter(todayStart) && cbTime.isBefore(todayEnd));
+  }
+
+  for (var phone in allPhones) {
+    final contact = contacts.firstWhere(
+      (c) => RecipientImporter.isSamePhone(c.phone, phone),
+      orElse: () => ContactDto(phone: phone, name: "", notes: ""),
+    );
+    final isSaved = contacts.any((c) => RecipientImporter.isSamePhone(c.phone, phone));
+    
+    // Find matching thread
+    SmsMessageDto? lastMsg;
+    for (var entry in threads.entries) {
+      if (RecipientImporter.isSamePhone(entry.key, phone)) {
+        lastMsg = entry.value.lastOrNull;
+        break;
+      }
+    }
+    
+    int unread = unreadCounts[phone] ?? 0;
+    if (unread == 0) {
+      for (var entry in unreadCounts.entries) {
+        if (RecipientImporter.isSamePhone(entry.key, phone)) {
+          unread = entry.value;
+          break;
+        }
+      }
+    }
+
+    items.add(SidebarClientItem(
+      phone: phone,
+      contact: isSaved ? contact : null,
+      lastMessage: lastMsg,
+      unreadCount: unread,
+    ));
+  }
+
+  // Sort:
+  // 1. Unread count (descending)
+  // 2. Pending callback (yes first)
+  // 3. Last message date (descending, if exists)
+  // 4. Alphabetical by name / phone (fallback)
+  items.sort((a, b) {
+    if (a.unreadCount != b.unreadCount) {
+      return b.unreadCount.compareTo(a.unreadCount);
+    }
+
+    final aPending = isPendingCallback(a.contact);
+    final bPending = isPendingCallback(b.contact);
+    if (aPending != bPending) {
+      return aPending ? -1 : 1;
+    }
+
+    if (a.lastMessage != null && b.lastMessage != null) {
+      return b.lastMessage!.date.compareTo(a.lastMessage!.date);
+    } else if (a.lastMessage != null) {
+      return -1;
+    } else if (b.lastMessage != null) {
+      return 1;
+    }
+
+    final nameA = a.contact?.name ?? '';
+    final nameB = b.contact?.name ?? '';
+    if (nameA.isNotEmpty || nameB.isNotEmpty) {
+      if (nameA.isEmpty) return 1;
+      if (nameB.isEmpty) return -1;
+      return nameA.toLowerCase().compareTo(nameB.toLowerCase());
+    }
+
+    return a.phone.compareTo(b.phone);
+  });
+
+  return items;
+});
+
+final filteredSidebarClientsProvider = Provider<List<SidebarClientItem>>((ref) {
+  final allClients = ref.watch(sidebarClientsProvider);
+  final query = ref.watch(searchQueryProvider).toLowerCase().trim();
+  final threads = ref.watch(threadsProvider);
+
+  if (query.isEmpty) {
+    return allClients;
+  }
+
+  return allClients.where((item) {
+    final phoneMatch = item.phone.toLowerCase().contains(query);
+    
+    final nameMatch = item.contact != null && 
+        item.contact!.name.toLowerCase().contains(query);
+        
+    final notesMatch = item.contact != null && 
+        item.contact!.notes.toLowerCase().contains(query);
+
+    bool msgMatch = false;
+    for (var entry in threads.entries) {
+      if (RecipientImporter.isSamePhone(entry.key, item.phone)) {
+        msgMatch = entry.value.any((m) => m.body.toLowerCase().contains(query));
+        break;
+      }
+    }
+
+    return phoneMatch || nameMatch || notesMatch || msgMatch;
+  }).toList();
 });
 
 // === SYNC LOGIC (FutureProvider) ===
@@ -691,7 +1386,17 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
       if (disposed) return;
       ref.read(simsProvider.notifier).set(sims);
 
-      // Загружаем последние сообщения для формирования списка чатов
+      // 1. Загружаем цепочки (до 500 уникальных чатов со смартфона)
+      try {
+        final threadsMsgs = await api.fetchThreads(limit: 500);
+        for (var tm in threadsMsgs) {
+          ref.read(allMessagesProvider.notifier).add(tm);
+        }
+      } catch (e) {
+        debugPrint("fetchThreads error: $e");
+      }
+
+      // 2. Загружаем последние 200 сообщений для детализации
       final msgs = await api.fetchMessages(limit: 200);
       if (disposed) return;
       ref.read(allMessagesProvider.notifier).set(msgs);
@@ -699,6 +1404,23 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
       // Загружаем контакты
       await ref.read(contactsProvider.notifier).load();
       if (disposed) return;
+
+      // Загружаем рассылки
+      await ref.read(campaignsProvider.notifier).load();
+
+      // Загружаем журнал звонков
+      try {
+        await ref.read(callLogsProvider.notifier).load();
+      } catch (e) {
+        debugPrint("load callLogs error: $e");
+      }
+
+      // Загружаем громкость телефона
+      try {
+        await ref.read(deviceVolumeProvider.notifier).load();
+      } catch (e) {
+        debugPrint("load deviceVolume error: $e");
+      }
 
       ref.read(isConnectedProvider.notifier).set(true);
 
@@ -708,22 +1430,59 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
           if (data['type'] == 'NEW_SMS') {
             final msg = SmsMessageDto.fromJson(data['data']);
 
-            // Обновляем общий список (для сайдбара)
+            // Обновляем общий список (для сайдбара и счетчиков)
             ref.read(allMessagesProvider.notifier).add(msg);
 
-            // Обновляем текущий открытый чат, если он совпадает
+            // Обновляем текущий открытый чат с нормализацией телефонов
             final currentChat = ref.read(selectedChatIdProvider);
-            if (currentChat == msg.address) {
-              ref.read(chatMessagesProvider(msg.address)).addMessage(msg);
+            if (currentChat != null && RecipientImporter.isSamePhone(currentChat, msg.address)) {
+              ref.read(chatMessagesProvider(currentChat)).addMessage(msg);
             }
+            ref.read(chatMessagesProvider(msg.address)).addMessage(msg);
 
             if (!msg.isSent) {
-              if (currentChat != msg.address) {
+              if (currentChat == null || !RecipientImporter.isSamePhone(currentChat, msg.address)) {
                 ref.read(unreadCountsProvider.notifier).increment(msg.address);
                 try {
                   await SfxService.playReceived();
                 } catch (_) {}
               }
+            }
+          } else if (data['type'] == 'CAMPAIGN_UPDATE') {
+            try {
+              final campaign = CampaignDto.fromJson(Map<String, dynamic>.from(data['data']));
+              ref.read(campaignsProvider.notifier).addOrUpdate(campaign);
+            } catch (e) {
+              debugPrint("WS CAMPAIGN_UPDATE parse error: $e");
+            }
+          } else if (data['type'] == 'CAMPAIGN_ITEM_PROCESSED') {
+            try {
+              final campaignId = data['data']['campaignId']?.toString() ?? '';
+              final item = CampaignItemDto.fromJson(Map<String, dynamic>.from(data['data']['item']));
+              ref.read(campaignsProvider.notifier).updateItem(campaignId, item);
+            } catch (e) {
+              debugPrint("WS CAMPAIGN_ITEM_PROCESSED parse error: $e");
+            }
+          } else if (data['type'] == 'CALL_STATE_CHANGED') {
+            try {
+              final callData = Map<String, dynamic>.from(data['data'] as Map);
+              ref.read(activeCallProvider.notifier).handleEvent(callData);
+              final rawState = callData['state']?.toString().toUpperCase() ?? '';
+              if (rawState == 'IDLE' || rawState == 'DISCONNECTED') {
+                Future.delayed(const Duration(milliseconds: 1500), () {
+                  ref.read(callLogsProvider.notifier).load();
+                });
+              }
+            } catch (e) {
+              debugPrint("WS CALL_STATE_CHANGED parse error: $e");
+            }
+          } else if (data['type'] == 'DEVICE_VOLUME_CHANGED') {
+            try {
+              final volData = Map<String, dynamic>.from(data['data'] as Map);
+              final vol = DeviceVolumeDto.fromJson(volData);
+              ref.read(deviceVolumeProvider.notifier).set(vol);
+            } catch (e) {
+              debugPrint("WS DEVICE_VOLUME_CHANGED parse error: $e");
             }
           }
         },
@@ -742,9 +1501,9 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
   // Initial connect
   await connect();
 
-  // Reconnection & Health check timer
+  // Reconnection, Health check & Smart Delta Sync timer (every 4 seconds)
   var isChecking = false;
-  final healthTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+  final healthTimer = Timer.periodic(const Duration(seconds: 4), (timer) async {
     if (disposed || isChecking) return;
     isChecking = true;
     final isConnected = ref.read(isConnectedProvider);
@@ -754,6 +1513,32 @@ final syncProvider = FutureProvider.autoDispose((ref) async {
         // Если восстановили связь по HTTP, пробуем переподключить WS
         await connect();
       }
+
+      // Smart Delta Sync: подтягиваем свежие сообщения с сервера с надежной дедупликацией
+      try {
+        final recentMsgs = await api.fetchMessages(limit: 50);
+        final currentMessages = ref.read(allMessagesProvider);
+        final currentChat = ref.read(selectedChatIdProvider);
+
+        for (var rm in recentMsgs) {
+          final alreadyKnown = currentMessages.any((m) => isSameSmsMessage(m, rm));
+
+          ref.read(allMessagesProvider.notifier).add(rm);
+
+          if (currentChat != null && RecipientImporter.isSamePhone(currentChat, rm.address)) {
+            ref.read(chatMessagesProvider(currentChat)).addMessage(rm);
+          }
+
+          if (!alreadyKnown && !rm.isSent) {
+            if (currentChat == null || !RecipientImporter.isSamePhone(currentChat, rm.address)) {
+              ref.read(unreadCountsProvider.notifier).increment(rm.address);
+              try {
+                await SfxService.playReceived();
+              } catch (_) {}
+            }
+          }
+        }
+      } catch (_) {}
     } catch (e) {
       if (!disposed && isConnected) {
         ref.read(isConnectedProvider.notifier).set(false);

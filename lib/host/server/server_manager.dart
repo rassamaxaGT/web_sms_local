@@ -8,12 +8,16 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:nsd/nsd.dart';
 import '../data/native_sms_client.dart';
 import '../data/template_storage.dart';
+import '../data/campaign_storage.dart';
+import '../service/broadcast_engine.dart';
 import 'http_router.dart';
 
 class ServerManager {
   HttpServer? _server;
   final NativeSmsClient _smsClient = NativeSmsClient();
   final TemplateStorage _templateStorage = TemplateStorage();
+  final CampaignStorage _campaignStorage = CampaignStorage();
+  late final BroadcastEngine _broadcastEngine = BroadcastEngine(_campaignStorage, _smsClient);
   HttpRouter? _router;
   Registration? _registration;
 
@@ -23,6 +27,7 @@ class ServerManager {
   bool _isSecured = false;
 
   NativeSmsClient get smsClient => _smsClient;
+  BroadcastEngine get broadcastEngine => _broadcastEngine;
 
   // Геттеры для проверки состояния из виджетов
   bool get isRunning => _server != null;
@@ -65,7 +70,14 @@ class ServerManager {
       staticPath = docDir.path;
     }
 
-    _router = HttpRouter(_smsClient, _templateStorage, null, staticPath);
+    _router = HttpRouter(
+      _smsClient,
+      _templateStorage,
+      _campaignStorage,
+      _broadcastEngine,
+      null,
+      staticPath,
+    );
 
     await _router!.initialize();
 

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../data/native_sms_client.dart';
 import '../../../shared/theme.dart';
+import '../../../shared/app_logger.dart';
 import '../widgets/server_control_panel.dart';
 import 'chat_screen.dart';
 
@@ -14,17 +15,21 @@ class InboxScreen extends StatefulWidget {
   State<InboxScreen> createState() => _InboxScreenState();
 }
 
-class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStateMixin {
+class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final NativeSmsClient _smsClient = NativeSmsClient();
 
   List<SmsMessageDto> _messages = [];
   bool _isLoading = true;
+  String? _initError;
   StreamSubscription? _smsSubscription;
   late final AnimationController _bgAnimationController;
+  bool _isDefaultSmsApp = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    AppLogger.info("InboxScreen initState()", tag: "UI");
     _bgAnimationController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 25),
@@ -33,43 +38,122 @@ class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStat
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkDefaultSmsApp();
+    }
+  }
+
+  Future<void> _checkDefaultSmsApp() async {
+    try {
+      final isDef = await _smsClient.isDefaultSmsApp();
+      if (mounted && isDef != _isDefaultSmsApp) {
+        setState(() => _isDefaultSmsApp = isDef);
+      }
+    } catch (_) {}
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _smsSubscription?.cancel();
     _bgAnimationController.dispose();
     super.dispose();
   }
 
+  bool _hasSmsPermission = false;
+
   Future<void> _initApp() async {
-    // 1. Request SMS + Phone + Contacts + Notifications permissions
-    await [
-      Permission.sms,
-      Permission.phone,
-      Permission.contacts,
-      Permission.notification,
-    ].request();
+    try {
+      AppLogger.info("Requesting Android permissions...", tag: "PERM");
+      // 1. Request SMS + Phone + Contacts + Notifications permissions
+      final statuses = await [
+        Permission.sms,
+        Permission.phone,
+        Permission.contacts,
+        Permission.notification,
+      ].request();
 
-    // 2. Load History
-    await _loadMessages();
+      statuses.forEach((permission, status) {
+        AppLogger.info("Permission $permission -> $status", tag: "PERM");
+      });
 
-    // 3. Subscribe to real-time incoming SMS
-    _smsSubscription = _smsClient.onSmsReceived.listen((msg) {
+      _hasSmsPermission = statuses[Permission.sms]?.isGranted ?? false;
+      if (!_hasSmsPermission) {
+        _hasSmsPermission = await Permission.sms.isGranted;
+      }
+
+      // Ensure READ_CALL_LOG permission is requested for syncing system call log
+      try {
+        final hasCallLog = await _smsClient.hasCallLogPermission();
+        if (!hasCallLog) {
+          AppLogger.info("Requesting READ_CALL_LOG permission...", tag: "PERM");
+          await _smsClient.requestCallLogPermission();
+        } else {
+          AppLogger.info("READ_CALL_LOG permission already granted", tag: "PERM");
+        }
+      } catch (e) {
+        AppLogger.error("Error requesting call log permission", tag: "PERM", error: e);
+      }
+
+      // Check Default SMS App status
+      _isDefaultSmsApp = await _smsClient.isDefaultSmsApp();
+
+      if (_hasSmsPermission) {
+        // 2. Load History
+        AppLogger.info("Loading SMS message history...", tag: "SMS");
+        await _loadMessages();
+
+        // 3. Subscribe to real-time incoming SMS
+        AppLogger.info("Subscribing to incoming SMS stream...", tag: "SMS");
+        _smsSubscription?.cancel();
+        _smsSubscription = _smsClient.onSmsReceived.listen(
+          (msg) {
+            AppLogger.info("Received real-time SMS from ${msg.address}", tag: "SMS_RECV");
+            if (mounted) {
+              setState(() {
+                _messages.insert(0, msg);
+              });
+              SfxService.playReceived();
+            }
+          },
+          onError: (err, stack) {
+            AppLogger.error("Incoming SMS stream error", tag: "SMS_STREAM", error: err, stackTrace: stack);
+          },
+        );
+      } else {
+        AppLogger.info("SMS permission not granted. Waiting for user action.", tag: "PERM");
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+          });
+        }
+      }
+    } catch (e, stack) {
+      AppLogger.error("Error during InboxScreen initApp", tag: "UI_INIT", error: e, stackTrace: stack);
       if (mounted) {
         setState(() {
-          _messages.insert(0, msg);
+          _initError = e.toString();
+          _isLoading = false;
         });
-        SfxService.playReceived();
       }
-    });
+    }
   }
 
   Future<void> _loadMessages() async {
     setState(() => _isLoading = true);
-    final msgs = await _smsClient.getMessages(limit: 100);
-    if (mounted) {
-      setState(() {
-        _messages = msgs;
-        _isLoading = false;
-      });
+    try {
+      final msgs = await _smsClient.getMessages(limit: 100);
+      if (mounted) {
+        setState(() {
+          _messages = msgs;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -114,6 +198,25 @@ class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStat
         elevation: 0,
         centerTitle: false,
         actions: [
+          // Diagnostics log button
+          IconButton(
+            icon: const Icon(Icons.receipt_long_rounded, color: AppColors.textSecondary, size: 20),
+            tooltip: "Журнал логов",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const StartupErrorScreen(),
+                ),
+              );
+            },
+            style: IconButton.styleFrom(
+              backgroundColor: AppColors.cardBgSolid,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              padding: const EdgeInsets.all(10),
+            ),
+          ),
+          const SizedBox(width: 8),
           // Elegant physical link icon to bring up sync panel
           IconButton(
             icon: const Icon(Icons.wifi_tethering_rounded, color: AppColors.accentLight, size: 22),
@@ -206,31 +309,170 @@ class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStat
                   onRefresh: _loadMessages,
                   color: AppColors.accent,
                   backgroundColor: AppColors.cardBgSolid,
-                  child: sortedAddresses.isEmpty
-                      ? Center(
+                  child: Column(
+                    children: [
+                      if (!_hasSmsPermission)
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.all(12),
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: AppColors.accent.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: AppColors.accent.withValues(alpha: 0.4)),
+                          ),
                           child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Icon(
-                                Icons.chat_bubble_outline_rounded,
-                                size: 64,
-                                color: AppColors.textSecondary.withValues(alpha: 0.5),
+                              const Row(
+                                children: [
+                                  Icon(Icons.security_rounded, color: AppColors.accentLight, size: 22),
+                                  SizedBox(width: 10),
+                                  Text(
+                                    "ТРЕБУЮТСЯ РАЗРЕШЕНИЯ",
+                                    style: TextStyle(
+                                      color: AppColors.accentLight,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                      letterSpacing: 1.0,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 16),
+                              const SizedBox(height: 8),
                               const Text(
-                                "Список диалогов пуст",
-                                style: TextStyle(color: AppColors.textSecondary, fontSize: 14),
+                                "Для работы SMS-шлюза необходимо предоставить разрешения на SMS, телефон и контакты.",
+                                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                              ),
+                              const SizedBox(height: 12),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppColors.accent,
+                                  foregroundColor: Colors.white,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                                onPressed: () async {
+                                  await openAppSettings();
+                                  _initApp();
+                                },
+                                icon: const Icon(Icons.settings_rounded, size: 16),
+                                label: const Text("Предоставить в настройках"),
                               ),
                             ],
                           ),
-                        )
-                      : ListView.builder(
-                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                          itemCount: sortedAddresses.length,
-                          addRepaintBoundaries: true,
-                          itemBuilder: (ctx, i) {
-                            final address = sortedAddresses[i];
-                            final lastMsg = threads[address]!;
+                        ),
+                      if (_hasSmsPermission && !_isDefaultSmsApp)
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0x28F59E0B), Color(0x18B45309)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: const Color(0x66F59E0B)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Row(
+                                children: [
+                                  Icon(Icons.shield_outlined, color: Color(0xFFFBBF24), size: 20),
+                                  SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      "РЕЖИМ БЕЗЛИМИТНОЙ ОТПРАВКИ",
+                                      style: TextStyle(
+                                        color: Color(0xFFFBBF24),
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12,
+                                        letterSpacing: 0.8,
+                                        fontFamily: 'Outfit',
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              const Text(
+                                "SMS Host не выбран приложением по умолчанию. Чтобы Android не блокировал массовые рассылки предупреждениями, сделайте его приложением SMS по умолчанию.",
+                                style: TextStyle(color: AppColors.textSecondary, fontSize: 12, height: 1.3),
+                              ),
+                              const SizedBox(height: 10),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFF59E0B),
+                                  foregroundColor: Colors.black,
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                                onPressed: () async {
+                                  await _smsClient.requestDefaultSmsApp();
+                                  await Future.delayed(const Duration(seconds: 1));
+                                  _checkDefaultSmsApp();
+                                },
+                                icon: const Icon(Icons.check_circle_rounded, size: 16, color: Colors.black),
+                                label: const Text(
+                                  "Сделать приложением по умолчанию",
+                                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (_initError != null)
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.all(12),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.error.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: AppColors.error.withValues(alpha: 0.4)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.error_outline, color: AppColors.error, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  "Ошибка инициализации: $_initError",
+                                  style: const TextStyle(color: AppColors.error, fontSize: 12),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      Expanded(
+                        child: sortedAddresses.isEmpty
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.chat_bubble_outline_rounded,
+                                      size: 64,
+                                      color: AppColors.textSecondary.withValues(alpha: 0.5),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    const Text(
+                                      "Список диалогов пуст",
+                                      style: TextStyle(color: AppColors.textSecondary, fontSize: 14),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ListView.builder(
+                                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                                itemCount: sortedAddresses.length,
+                                addRepaintBoundaries: true,
+                                itemBuilder: (ctx, i) {
+                                  final address = sortedAddresses[i];
+                                  final lastMsg = threads[address]!;
 
                             // UniqueDeterministic sleek graphite linear gradient based on contact string hash
                             final startColor = Color((address.hashCode * 0xFF7A) | 0xFF000000).withValues(alpha: 0.85);
@@ -422,6 +664,9 @@ class _InboxScreenState extends State<InboxScreen> with SingleTickerProviderStat
                             );
                           },
                         ),
+                      ),
+                    ],
+                  ),
                 ),
         ],
       ),
