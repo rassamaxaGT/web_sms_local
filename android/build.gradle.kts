@@ -28,15 +28,20 @@ subprojects {
     val fixNamespace: Project.() -> Unit = {
         // Проверяем, есть ли у проекта расширение "android"
         val android = extensions.findByName("android") as? com.android.build.gradle.BaseExtension
-        if (android != null && android.namespace == null) {
-            // Устанавливаем namespace вручную
-            android.namespace = if (name == "telephony") {
-                "com.shounakmulay.telephony"
-            } else {
-                "com.fix.${name.replace("-", ".")}"
+        if (android != null) {
+            // Поднимем версию SDK для всех плагинов (кроме самого приложения) до 34
+            if (project.name != "app") {
+                android.compileSdkVersion(34)
             }
-            // Также на всякий случай поднимем версию SDK для этого плагина
-            android.compileSdkVersion(34)
+            
+            if (android.namespace == null) {
+                // Устанавливаем namespace вручную
+                android.namespace = if (name == "telephony") {
+                    "com.shounakmulay.telephony"
+                } else {
+                    "com.fix.${name.replace("-", ".")}"
+                }
+            }
         }
     }
 

@@ -1,6 +1,8 @@
 import 'package:web/web.dart' as web;
 
 /// Web-specific storage implementation using window.localStorage.
+Future<void> initDesktopStorage() async {}
+
 bool getSoundEnabled() {
   try {
     final savedValue = web.window.localStorage.getItem('sound_effects_enabled');

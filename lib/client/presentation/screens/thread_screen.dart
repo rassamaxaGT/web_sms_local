@@ -2,6 +2,7 @@ import 'package:android_host/shared/shared_models.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../logic/providers.dart';
+import '../../utils/recipient_importer.dart';
 import '../widgets/message_bubble.dart';
 import '../../../shared/theme.dart';
 
@@ -39,10 +40,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
   }
 
+  bool _isSending = false;
+
   void _send() async {
+    if (_isSending) return;
     final txt = _controller.text.trim();
     if (txt.isEmpty || _selectedSimId == null) return;
 
+    setState(() => _isSending = true);
     final api = ref.read(apiClientProvider);
     try {
       await api?.sendSms(widget.phone, txt, _selectedSimId!);
@@ -57,6 +62,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           backgroundColor: AppColors.error,
         ),
       );
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+      }
     }
   }
 
@@ -73,12 +82,33 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   @override
   Widget build(BuildContext context) {
     final threads = ref.watch(threadsProvider);
-    final messages = threads[widget.phone] ?? [];
+    List<SmsMessageDto> messages = [];
+    for (var entry in threads.entries) {
+      if (RecipientImporter.isSamePhone(entry.key, widget.phone)) {
+        messages = entry.value;
+        break;
+      }
+    }
     final sims = ref.watch(simsProvider);
 
     ref.listen(threadsProvider, (prev, next) {
-      if ((next[widget.phone]?.length ?? 0) >
-          (prev?[widget.phone]?.length ?? 0)) {
+      int prevLen = 0;
+      int nextLen = 0;
+      if (prev != null) {
+        for (var e in prev.entries) {
+          if (RecipientImporter.isSamePhone(e.key, widget.phone)) {
+            prevLen = e.value.length;
+            break;
+          }
+        }
+      }
+      for (var e in next.entries) {
+        if (RecipientImporter.isSamePhone(e.key, widget.phone)) {
+          nextLen = e.value.length;
+          break;
+        }
+      }
+      if (nextLen > prevLen) {
         Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
       }
     });

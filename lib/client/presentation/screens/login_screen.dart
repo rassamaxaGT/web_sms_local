@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'package:web/web.dart' as web;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +10,7 @@ import 'package:http/http.dart' as http;
 import '../../logic/providers.dart';
 import '../../logic/network_scanner.dart';
 import '../../../shared/theme.dart';
+import '../../utils/web_helper.dart';
 import 'home_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -50,13 +50,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> with SingleTickerProv
       return;
     }
 
-    final location = web.window.location;
-    final hostname = location.hostname;
-    final protocol = location.protocol;
-    final host = location.host;
-
-    if (hostname.startsWith("192.168.") || hostname.startsWith("10.")) {
-      final hostUrl = "$protocol//$host";
+    final hostUrl = getWebHostUrl();
+    if (hostUrl != null) {
       setState(() {
         _foundHost = hostUrl;
         _isScanning = false;

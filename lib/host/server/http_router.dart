@@ -8,13 +8,22 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../data/native_sms_client.dart';
 import '../data/template_storage.dart';
 import '../data/contact_storage.dart';
+import '../data/campaign_storage.dart';
+import '../service/broadcast_engine.dart';
 import '../../shared/shared_models.dart';
+import '../../shared/contractor_models.dart';
+import '../../client/data/tbank_contractor_service.dart';
 import '../../shared/security_service.dart';
+import '../../shared/app_logger.dart';
+import '../../client/utils/recipient_importer.dart';
+import 'package:flutter/services.dart';
 
 class HttpRouter {
   final NativeSmsClient _smsClient;
   final TemplateStorage _templateStorage;
   final ContactStorage _contactStorage = ContactStorage();
+  final CampaignStorage _campaignStorage;
+  final BroadcastEngine _broadcastEngine;
   SecurityService _security;
   final String _webRootPath;
   final List<WebSocketChannel> _sockets = [];
@@ -28,11 +37,34 @@ class HttpRouter {
   DateTime _lastActivity = DateTime.now();
   void Function()? onIdle;
 
-  HttpRouter(this._smsClient, this._templateStorage, this._security, this._webRootPath, {this.onIdle}) {
+  HttpRouter(
+    this._smsClient,
+    this._templateStorage,
+    this._campaignStorage,
+    this._broadcastEngine,
+    this._security,
+    this._webRootPath, {
+    this.onIdle,
+  }) {
     _smsClient.onSmsReceived.listen((msg) {
       _lastActivity = DateTime.now();
       broadcast(msg);
     });
+
+    _smsClient.onCallStateChanged.listen((event) {
+      _lastActivity = DateTime.now();
+      broadcastCustom('CALL_STATE_CHANGED', event);
+    });
+
+    _smsClient.onDeviceStateChanged.listen((volumeDto) {
+      _lastActivity = DateTime.now();
+      broadcastCustom('DEVICE_VOLUME_CHANGED', volumeDto.toJson());
+    });
+
+    _broadcastEngine.onEvent = (type, data) {
+      _lastActivity = DateTime.now();
+      broadcastCustom(type, data);
+    };
     
     // Периодическая проверка простоя (например, каждые 5 минут)
     Timer.periodic(const Duration(minutes: 5), (timer) {
@@ -79,11 +111,15 @@ class HttpRouter {
   }
 
   void broadcast(SmsMessageDto msg) {
+    broadcastCustom('NEW_SMS', msg.toJson());
+  }
+
+  void broadcastCustom(String type, dynamic data) {
     if (_sockets.isEmpty) return;
     try {
       final encrypted = _security.encrypt({
-        'type': 'NEW_SMS',
-        'data': msg.toJson(),
+        'type': type,
+        'data': data,
       });
       for (var ws in _sockets) {
         try {
@@ -91,7 +127,7 @@ class HttpRouter {
         } catch (_) {}
       }
     } catch (e) {
-      stdout.writeln("Broadcast error: $e");
+      stdout.writeln("Broadcast error ($type): $e");
     }
   }
 
@@ -195,6 +231,81 @@ class HttpRouter {
       return _encryptedRes({'status': 'ok'});
     });
 
+    // === Campaigns (Broadcast) API ===
+    router.get('/api/campaigns', (Request req) async {
+      _trackActivity();
+      final campaigns = await _campaignStorage.loadCampaigns(summaryOnly: false);
+      return _encryptedRes(campaigns.map((e) => e.toJson(includeItems: true)).toList());
+    });
+
+    router.get('/api/campaigns/<id>', (Request req, String id) async {
+      _trackActivity();
+      final campaign = await _campaignStorage.getCampaign(id);
+      if (campaign == null) return Response.notFound('Campaign not found');
+      return _encryptedRes(campaign.toJson(includeItems: true));
+    });
+
+    router.post('/api/campaigns', (Request req) async {
+      _trackActivity();
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+      final campaign = CampaignDto.fromJson(Map<String, dynamic>.from(data));
+      await _campaignStorage.saveCampaign(campaign);
+      return _encryptedRes({'status': 'ok', 'id': campaign.id});
+    });
+
+    router.post('/api/campaigns/<id>/start', (Request req, String id) async {
+      _trackActivity();
+      await _broadcastEngine.startCampaign(id);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.post('/api/campaigns/<id>/pause', (Request req, String id) async {
+      _trackActivity();
+      await _broadcastEngine.pauseCampaign(id);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.post('/api/campaigns/<id>/stop', (Request req, String id) async {
+      _trackActivity();
+      await _broadcastEngine.stopCampaign(id);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.post('/api/campaigns/<id>/retry-failed', (Request req, String id) async {
+      _trackActivity();
+      await _broadcastEngine.retryFailed(id);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    router.delete('/api/campaigns/<id>', (Request req, String id) async {
+      _trackActivity();
+      if (_broadcastEngine.activeCampaignId == id) {
+        await _broadcastEngine.stopCampaign(id);
+      }
+      await _campaignStorage.deleteCampaign(id);
+      return _encryptedRes({'status': 'ok'});
+    });
+
+    // === Contractor API (Proxy to avoid browser CORS) ===
+    router.get('/api/contractor/search', (Request req) async {
+      _trackActivity();
+      final query = req.url.queryParameters['query'] ?? '';
+      final service = TBankContractorService();
+      final results = await service.search(query);
+      return _encryptedRes(results.map((e) => e.toJson()).toList());
+    });
+
+    router.post('/api/contractor/okved', (Request req) async {
+      _trackActivity();
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+      final contractor = ContractorDto.fromJson(Map<String, dynamic>.from(data));
+      final service = TBankContractorService();
+      final enriched = await service.fetchOkvedDetails(contractor);
+      return _encryptedRes(enriched.toJson());
+    });
+
     router.post('/api/send', (Request req) async {
       _trackActivity();
       final payload = await req.readAsString();
@@ -222,10 +333,131 @@ class HttpRouter {
       return _encryptedRes({'status': 'ok'});
     });
 
+    router.post('/api/call', (Request req) async {
+      _trackActivity();
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+
+      final phone = data['phone'];
+      final subId = data['subId'] ?? -1;
+
+      if (phone != null) {
+        const platform = MethodChannel('com.example.sms_host/methods');
+        try {
+          await platform.invokeMethod('makePhoneCall', {
+            'phoneNumber': phone,
+            'subscriptionId': subId,
+          });
+          return _encryptedRes({'status': 'ok'});
+        } catch (e) {
+          return Response.internalServerError(
+            body: jsonEncode({'error': e.toString()}),
+            headers: {'content-type': 'application/json'},
+          );
+        }
+      }
+      return Response.badRequest(body: 'Missing phone');
+    });
+
+    router.post('/api/call/hangup', (Request req) async {
+      _trackActivity();
+      try {
+        final success = await _smsClient.endPhoneCall();
+        return _encryptedRes({'status': 'ok', 'terminated': success});
+      } catch (e) {
+        return Response.internalServerError(
+          body: jsonEncode({'error': e.toString()}),
+          headers: {'content-type': 'application/json'},
+        );
+      }
+    });
+
+    router.get('/api/calls', (Request req) async {
+      _trackActivity();
+      final params = req.url.queryParameters;
+      final limit = int.tryParse(params['limit'] ?? '') ?? 200;
+      final offset = int.tryParse(params['offset'] ?? '') ?? 0;
+      final calls = await _smsClient.getCallLogs(limit: limit, offset: offset);
+
+      // Only add name from CRM contact if Android system call log did not specify a name
+      try {
+        final contacts = await _contactStorage.loadContacts();
+        final enriched = calls.map((call) {
+          if (call.name == null || call.name!.trim().isEmpty) {
+            final matched = contacts.firstWhere(
+              (c) => RecipientImporter.isSamePhone(c.phone, call.number) && c.name.trim().isNotEmpty,
+              orElse: () => ContactDto(phone: '', name: '', notes: ''),
+            );
+            if (matched.name.trim().isNotEmpty) {
+              return CallLogEntryDto(
+                id: call.id,
+                number: call.number,
+                name: matched.name.trim(),
+                date: call.date,
+                durationSeconds: call.durationSeconds,
+                direction: call.direction,
+                status: call.status,
+                comment: call.comment,
+              );
+            }
+          }
+          return call;
+        }).toList();
+        return _encryptedRes(enriched.map((e) => e.toJson()).toList());
+      } catch (e) {
+        return _encryptedRes(calls.map((e) => e.toJson()).toList());
+      }
+    });
+
+    // === Device Volume API ===
+    router.get('/api/device/volume', (Request req) async {
+      _trackActivity();
+      final volumeDto = await _smsClient.getDeviceVolume();
+      return _encryptedRes(volumeDto.toJson());
+    });
+
+    router.post('/api/device/volume', (Request req) async {
+      _trackActivity();
+      final payload = await req.readAsString();
+      final data = _security.decrypt(payload);
+      final stream = data['stream']?.toString() ?? 'ring';
+
+      DeviceVolumeDto updated;
+      if (data['direction'] != null) {
+        final direction = data['direction'].toString();
+        updated = await _smsClient.adjustDeviceVolume(stream: stream, direction: direction);
+      } else {
+        final volume = (data['volume'] as num?)?.toInt() ?? 0;
+        updated = await _smsClient.setDeviceVolume(stream: stream, volume: volume);
+      }
+      return _encryptedRes(updated.toJson());
+    });
+
+    router.get('/api/logs', (Request req) async {
+      _trackActivity();
+      final logs = await AppLogger.getFullLogText();
+      return Response.ok(
+        logs,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        },
+      );
+    });
+
     router.get('/ws', (Request req) {
       _trackActivity();
       return webSocketHandler((WebSocketChannel ws, _) {
         _sockets.add(ws);
+        _smsClient.getDeviceVolume().then((vol) {
+          try {
+            final encrypted = _security.encrypt({
+              'type': 'DEVICE_VOLUME_CHANGED',
+              'data': vol.toJson(),
+            });
+            ws.sink.add(encrypted);
+          } catch (_) {}
+        });
         ws.stream.listen((_) => _trackActivity(), onDone: () => _sockets.remove(ws));
       })(req);
     });

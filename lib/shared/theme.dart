@@ -14,6 +14,10 @@ class AppColors {
   static const Color accent = Color(0xFF6366F1); // Elegant Slate Blue-Violet
   static const Color accentLight = Color(0xFF818CF8); // Soft Lavender-Slate
   
+  static const Color primary = accent;
+  static const Color surface = cardBgSolid;
+  static const Color surfaceLight = Color(0xFF1E2028);
+  
   static const Color textPrimary = Color(0xFFF8FAFC); // Crisp slate 50
   static const Color textSecondary = Color(0xFF94A3B8); // Slate 400
   static const Color textPrimaryLight = Color(0xFF0F172A); // Slate 900

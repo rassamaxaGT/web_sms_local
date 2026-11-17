@@ -4,23 +4,37 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:android_host/host/server/server_manager.dart';
+import 'package:android_host/shared/app_logger.dart';
 
 Future<void> initializeBackgroundService() async {
   try {
+    AppLogger.info("Creating FlutterBackgroundService instance...", tag: "BKG_SVC");
     final service = FlutterBackgroundService();
 
     const AndroidNotificationChannel channel = AndroidNotificationChannel(
       'sms_server_channel',
       'SMS Server Service',
+      description: 'Foreground service for SMS Gateway and Web Server',
       importance: Importance.low,
     );
 
-    await FlutterLocalNotificationsPlugin()
+    AppLogger.info("Initializing FlutterLocalNotificationsPlugin...", tag: "BKG_SVC");
+    final notificationsPlugin = FlutterLocalNotificationsPlugin();
+    const initSettings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    );
+    await notificationsPlugin.initialize(initSettings);
+    AppLogger.success("NotificationsPlugin initialized.", tag: "BKG_SVC");
+
+    AppLogger.info("Creating notification channel sms_server_channel...", tag: "BKG_SVC");
+    await notificationsPlugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >()
         ?.createNotificationChannel(channel);
+    AppLogger.success("Notification channel created.", tag: "BKG_SVC");
 
+    AppLogger.info("Configuring service parameters...", tag: "BKG_SVC");
     await service.configure(
       androidConfiguration: AndroidConfiguration(
         onStart: onStart,
@@ -32,17 +46,18 @@ Future<void> initializeBackgroundService() async {
       ),
       iosConfiguration: IosConfiguration(),
     );
+    AppLogger.success("Background service configure finished.", tag: "BKG_SVC");
   } catch (e, stack) {
-    debugPrint("ERROR INITIALIZING BACKGROUND SERVICE: $e");
-    debugPrint(stack.toString());
+    AppLogger.error("Failed to initialize background service", tag: "BKG_SVC", error: e, stackTrace: stack);
   }
 }
 
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  // Гарантируем регистрацию плагинов (включая наш локальный плагин) во внешнем изоляте
+  // Guarantee plugin registration in background isolate
   DartPluginRegistrant.ensureInitialized();
+  debugPrint("[ISOLATE] Background service isolate started.");
 
   final ServerManager serverManager = ServerManager();
 
@@ -55,9 +70,11 @@ void onStart(ServiceInstance service) async {
     });
   }
 
-  // 1. Автоматический запуск сервера при старте службы
+  // 1. Start server automatically on background service start
   try {
+    debugPrint("[ISOLATE] Starting ServerManager...");
     final url = await serverManager.start();
+    debugPrint("[ISOLATE] ServerManager started at: $url");
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
         title: 'SMS Server Active',
@@ -65,7 +82,8 @@ void onStart(ServiceInstance service) async {
       );
     }
     sendStatus();
-  } catch (e) {
+  } catch (e, stack) {
+    debugPrint("[ISOLATE_ERROR] Server start failed: $e\n$stack");
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
         title: 'SMS Server Error',
@@ -75,12 +93,12 @@ void onStart(ServiceInstance service) async {
     sendStatus();
   }
 
-  // 2. Обработчик запроса статуса из UI
+  // 2. Handler for status requests from UI
   service.on('requestStatus').listen((event) {
     sendStatus();
   });
 
-  // 3. Обработчик обновления пароля и сессии (после сканирования QR)
+  // 3. Handler for security updates (QR scan)
   service.on('updateSecurity').listen((event) {
     if (event != null && event.containsKey('pass') && event.containsKey('id')) {
       serverManager.updatePassword(
@@ -97,8 +115,9 @@ void onStart(ServiceInstance service) async {
     }
   });
 
-  // 4. Обработчик остановки службы
+  // 4. Stop service handler
   service.on('stopService').listen((event) async {
+    debugPrint("[ISOLATE] Stopping service...");
     serverManager.stop();
     sendStatus();
     await service.stopSelf();

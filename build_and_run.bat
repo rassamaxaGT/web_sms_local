@@ -8,8 +8,7 @@ if not exist assets mkdir assets
 if exist build\web\assets\assets\web.zip del build\web\assets\assets\web.zip
 
 echo [3/4] Zipping Web Client...
-:: Используем PowerShell для создания zip (встроено в Windows)
 powershell -command "Compress-Archive -Path 'build\web\*' -DestinationPath 'assets\web.zip' -Force"
 
-echo [4/4] Running Android Host...
-call flutter run
+echo [4/4] Installing and Running Android Host (RELEASE MODE)...
+call flutter run --release -t lib/main.dart
